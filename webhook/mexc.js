@@ -76,6 +76,26 @@ export async function getContractDetail(symbol) {
 }
 
 /**
+ * Place a trigger (plan) order — used to attach TP or SL to an open position.
+ * triggerType: 1 = price >= triggerPrice, 2 = price <= triggerPrice
+ */
+async function placePlanOrder({ symbol, side, vol, leverage, openType, triggerPrice, triggerType, apiKey, apiSecret }) {
+  return request('POST', '/api/v1/private/planorder/place', {
+    symbol,
+    side,
+    vol,
+    leverage,
+    openType,
+    triggerPrice,
+    triggerType,
+    orderType: 5,     // market execution on trigger
+    executeCycle: 2,  // 7 days
+    trend: 1,         // last price
+    price: 0,
+  }, apiKey, apiSecret);
+}
+
+/**
  * Place an order on MEXC Futures.
  *
  * @param {object} params
@@ -142,11 +162,29 @@ export async function placeOrder(params) {
     side: mexcSide,
     type: ORDER_TYPE[type] ?? ORDER_TYPE.market,
     openType,
-    ...(tp ? { takeProfitPrice: tp } : {}),
-    ...(sl ? { stopLossPrice: sl } : {}),
   };
 
   const result = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
+
+  // Attach TP/SL as separate plan (trigger) orders after position opens.
+  // For long positions: close side = 4 (close long). For short: close side = 2 (close short).
+  const isOpening = side === 'open_long' || side === 'open_short';
+  if (isOpening && (tp || sl)) {
+    const closeSide = side === 'open_long' ? 4 : 2;
+    const planBase = { symbol, side: closeSide, vol: volume, leverage, openType, apiKey, apiSecret };
+
+    if (tp) {
+      // TP triggers when price >= tp (long) or price <= tp (short)
+      const triggerType = side === 'open_long' ? 1 : 2;
+      await placePlanOrder({ ...planBase, triggerPrice: tp, triggerType });
+    }
+
+    if (sl) {
+      // SL triggers when price <= sl (long) or price >= sl (short)
+      const triggerType = side === 'open_long' ? 2 : 1;
+      await placePlanOrder({ ...planBase, triggerPrice: sl, triggerType });
+    }
+  }
 
   return {
     orderId: result,
