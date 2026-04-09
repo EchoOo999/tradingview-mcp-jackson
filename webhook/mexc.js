@@ -91,7 +91,6 @@ async function placePlanOrder({ symbol, side, vol, leverage, openType, triggerPr
     orderType: 5,     // market execution on trigger
     executeCycle: 2,  // 7 days
     trend: 1,         // last price
-    price: 0,
   }, apiKey, apiSecret);
 }
 
