@@ -51,10 +51,6 @@ async function request(method, path, body, apiKey, apiSecret) {
 
 /**
  * Set leverage for a symbol + side.
- * @param {string} symbol  e.g. "BTC_USDT"
- * @param {number} leverage
- * @param {number} openType  1=isolated, 2=cross
- * @param {number} positionType  1=long, 2=short
  */
 export async function setLeverage(symbol, leverage, openType, positionType, apiKey, apiSecret) {
   return request('POST', '/api/v1/private/position/change_leverage', {
@@ -66,32 +62,36 @@ export async function setLeverage(symbol, leverage, openType, positionType, apiK
 }
 
 /**
- * Get contract info for a symbol (used to determine contract unit/step).
+ * Fetch open positions and return the one matching symbol + positionType.
+ * Retries up to maxRetries times with a 1s delay (market orders fill fast but
+ * the position may take a moment to appear).
+ * positionType: 1 = long, 2 = short
  */
-export async function getContractDetail(symbol) {
-  const res = await fetch(`${BASE_URL}/api/v1/contract/detail?symbol=${symbol}`);
-  const data = await res.json();
-  if (data.code !== 0 && data.code !== 200) throw new Error(`Contract info error: ${data.message}`);
-  return data.data;
+async function getOpenPosition(symbol, positionType, apiKey, apiSecret, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, 1000));
+    const positions = await request('GET', '/api/v1/private/position/open_positions', null, apiKey, apiSecret);
+    const match = (positions || []).find(p => p.symbol === symbol && p.positionType === positionType);
+    if (match) return match;
+  }
+  return null;
 }
 
 /**
- * Place a trigger (plan) order — used to attach TP or SL to an open position.
- * triggerType: 1 = price >= triggerPrice, 2 = price <= triggerPrice
+ * Set TP/SL on an open position via POST /api/v1/private/stoporder/place.
+ * This shows in the MEXC UI "TP/SL Order" tab and auto-cancels when position closes.
+ *
+ * lossTrend / profitTrend: 1 = last price, 2 = fair price, 3 = index price
  */
-async function placePlanOrder({ symbol, side, vol, leverage, openType, triggerPrice, triggerType, apiKey, apiSecret }) {
-  return request('POST', '/api/v1/private/planorder/place', {
+async function setPositionTpSl({ symbol, positionId, vol, tp, sl, apiKey, apiSecret }) {
+  const body = {
     symbol,
-    side,
+    positionId,
     vol,
-    leverage,
-    openType,
-    triggerPrice,
-    triggerType,
-    orderType: 5,     // market execution on trigger
-    executeCycle: 2,  // 7 days
-    trend: 1,         // last price
-  }, apiKey, apiSecret);
+    ...(tp ? { takeProfitPrice: tp, takeProfitOrderPrice: tp, profitTrend: 1 } : {}),
+    ...(sl ? { stopLossPrice: sl, stopLossOrderPrice: sl, stopLossType: 1, lossTrend: 1 } : {}),
+  };
+  return request('POST', '/api/v1/private/stoporder/place', body, apiKey, apiSecret);
 }
 
 /**
@@ -128,24 +128,23 @@ export async function placeOrder(params) {
 
   const isLong = side === 'open_long' || side === 'close_long';
   const positionType = isLong ? 1 : 2;
-  const openType = 1; // isolated (default; configurable later)
+  const openType = 1; // isolated
 
   // Set leverage first
   await setLeverage(symbol, leverage, openType, positionType, apiKey, apiSecret);
 
-  // Calculate position size in contracts
-  // sl_distance_pct = |entry - sl| / entry
-  // position_value_usd = usd_risk / sl_distance_pct
-  // volume (contracts) = position_value_usd / entry_price
+  // Get current price for position sizing
   let contractPrice = price;
   if (!contractPrice || type === 'market') {
-    // Get current mark price
     const tickerRes = await fetch(`${BASE_URL}/api/v1/contract/ticker?symbol=${symbol}`);
     const tickerData = await tickerRes.json();
     if (tickerData.code !== 0 && tickerData.code !== 200) throw new Error(`Ticker error: ${tickerData.message}`);
     contractPrice = parseFloat(tickerData.data.lastPrice || tickerData.data.indexPrice);
   }
 
+  // sl_distance_pct = |entry - sl| / entry
+  // position_value_usd = usd_risk / sl_distance_pct
+  // volume (contracts) = position_value_usd / entry_price * leverage
   const slDistance = Math.abs(contractPrice - sl) / contractPrice;
   if (slDistance <= 0) throw new Error('SL price must differ from entry price');
 
@@ -153,6 +152,7 @@ export async function placeOrder(params) {
   const volume = Math.floor((positionValueUsd / contractPrice) * leverage);
   if (volume < 1) throw new Error(`Computed volume < 1 contract. Increase usd_risk or leverage.`);
 
+  // Place the market/limit order
   const orderBody = {
     symbol,
     price: type === 'limit' ? price : 0,
@@ -163,30 +163,30 @@ export async function placeOrder(params) {
     openType,
   };
 
-  const result = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
+  const orderId = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
 
-  // Attach TP/SL as separate plan (trigger) orders after position opens.
-  // For long positions: close side = 4 (close long). For short: close side = 2 (close short).
+  // Attach TP/SL via stoporder/place (shows in "TP/SL Order" tab, auto-cancels with position)
   const isOpening = side === 'open_long' || side === 'open_short';
+  let tpslResult = null;
   if (isOpening && (tp || sl)) {
-    const closeSide = side === 'open_long' ? 4 : 2;
-    const planBase = { symbol, side: closeSide, vol: volume, leverage, openType, apiKey, apiSecret };
-
-    if (tp) {
-      // TP triggers when price >= tp (long) or price <= tp (short)
-      const triggerType = side === 'open_long' ? 1 : 2;
-      await placePlanOrder({ ...planBase, triggerPrice: tp, triggerType });
-    }
-
-    if (sl) {
-      // SL triggers when price <= sl (long) or price >= sl (short)
-      const triggerType = side === 'open_long' ? 2 : 1;
-      await placePlanOrder({ ...planBase, triggerPrice: sl, triggerType });
+    const position = await getOpenPosition(symbol, positionType, apiKey, apiSecret);
+    if (position) {
+      tpslResult = await setPositionTpSl({
+        symbol,
+        positionId: position.positionId,
+        vol: position.vol ?? volume,
+        tp,
+        sl,
+        apiKey,
+        apiSecret,
+      });
+    } else {
+      console.warn(`[WARN] Could not find open position for ${symbol} to attach TP/SL`);
     }
   }
 
   return {
-    orderId: result,
+    orderId,
     symbol,
     side,
     type,
@@ -196,5 +196,6 @@ export async function placeOrder(params) {
     tp: tp || null,
     sl: sl || null,
     positionValueUsd: Math.round(positionValueUsd * 100) / 100,
+    tpslAttached: tpslResult !== null,
   };
 }
