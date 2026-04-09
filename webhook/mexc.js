@@ -134,24 +134,6 @@ export async function placeOrder(params) {
   const volume = Math.floor((positionValueUsd / contractPrice) * leverage);
   if (volume < 1) throw new Error(`Computed volume < 1 contract. Increase usd_risk or leverage.`);
 
-  const tpslList = [];
-  if (tp) {
-    tpslList.push({
-      stopLossOrTakeProfitType: 2, // 2 = TP
-      triggerType: 1,              // 1 = last price
-      triggerPrice: String(tp),
-      executionType: 2,            // 2 = market close
-    });
-  }
-  if (sl) {
-    tpslList.push({
-      stopLossOrTakeProfitType: 1, // 1 = SL
-      triggerType: 1,
-      triggerPrice: String(sl),
-      executionType: 2,
-    });
-  }
-
   const orderBody = {
     symbol,
     price: type === 'limit' ? price : 0,
@@ -160,7 +142,8 @@ export async function placeOrder(params) {
     side: mexcSide,
     type: ORDER_TYPE[type] ?? ORDER_TYPE.market,
     openType,
-    ...(tpslList.length > 0 ? { stopLossOrTakeProfitList: tpslList } : {}),
+    ...(tp ? { takeProfitPrice: tp } : {}),
+    ...(sl ? { stopLossPrice: sl } : {}),
   };
 
   const result = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
