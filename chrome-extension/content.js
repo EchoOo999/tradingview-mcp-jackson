@@ -212,14 +212,27 @@
   const marginToggle = wireToggle('msp-margin-toggle');
   const typeToggle   = wireToggle('msp-type-toggle');
 
-  // Update entry field state when order type changes
+  // Managed interval for Market-mode auto-fill
+  let marketInterval = null;
+
+  function startMarketFill() {
+    stopMarketFill();
+    syncEntryPrice();                              // immediate fill on switch
+    marketInterval = setInterval(syncEntryPrice, 2000);
+  }
+
+  function stopMarketFill() {
+    if (marketInterval) { clearInterval(marketInterval); marketInterval = null; }
+  }
+
   function applyEntryMode(mode) {
     const isMarket = mode === 'market';
     entryInput.readOnly = isMarket;
     entryInput.classList.toggle('msp-entry-market', isMarket);
     document.getElementById('msp-entry-label').textContent =
       isMarket ? 'Entry Price (live)' : 'Entry Price (Limit)';
-    if (isMarket) syncEntryPrice();
+    if (isMarket) startMarketFill();
+    else          stopMarketFill();
   }
 
   document.getElementById('msp-type-toggle').addEventListener('change', (e) => {
@@ -236,16 +249,14 @@
   const entryInput = document.getElementById('msp-entry');
 
   function syncEntryPrice() {
-    const isMarket = typeToggle.getValue() === 'market';
-    if (!isMarket && entryInput.value) return;   // Limit + user typed → don't overwrite
     const p = getCurrentPrice();
-    if (p && p > 0 && p !== parseFloat(entryInput.value)) {
-      entryInput.value = p;
-      updatePreview();
-    }
+    if (!p || p <= 0) return;
+    if (p === parseFloat(entryInput.value)) return;   // already up to date
+    entryInput.value = p;
+    updatePreview();
   }
 
-  // Apply initial market state on load
+  // Apply initial market state on load (starts interval if default is Market)
   applyEntryMode(typeToggle.getValue());
 
   function updatePreview() {
@@ -329,9 +340,8 @@
   );
   document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
 
-  // Try to auto-fill entry from chart every 2s (only when entry field is empty)
-  setInterval(syncEntryPrice, 2000);
-  setTimeout(syncEntryPrice, 800);
+  // Initial preview render (entry may already be filled from applyEntryMode above)
+  setTimeout(updatePreview, 100);
 
   // ─── Symbol Badge ──────────────────────────────────────────────────────────
 
