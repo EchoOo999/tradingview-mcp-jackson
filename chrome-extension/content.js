@@ -59,12 +59,17 @@
     console.log('[MSP] getCurrentPrice() called, title=', document.title);
 
     // ── Strategy 1: Page title ─────────────────────────────────────────────────
-    // TV Desktop/Web sets title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
+    // TV Desktop title: "BTCUSDT.P 72,890.2 ▲ +1.59% Main Layout"
+    // TV Web title:     "84,250.12 · BTCUSDT.P · MEXC · TradingView"
+    // Scan every whitespace/separator token — pick the first one that parses > 100
     try {
-      const first = document.title.split(/[·\|\-–—]/)[0].trim();
-      const n = parsePrice(first);
-      console.log('[MSP] S1 title first segment:', JSON.stringify(first), '→ parsed:', n);
-      if (n && n > 1) { console.log('[MSP] S1 WIN:', n); return n; }
+      const segments = document.title.split(/[\s·\|\-–—]+/);
+      console.log('[MSP] S1 title segments:', segments);
+      for (const seg of segments) {
+        const n = parsePrice(seg);
+        console.log('[MSP] S1 segment:', JSON.stringify(seg), '→ parsed:', n);
+        if (n && n > 100) { console.log('[MSP] S1 WIN:', n); return n; }
+      }
     } catch (e) { console.log('[MSP] S1 error:', e.message); }
 
     // ── Strategy 2: Named price-axis SVG containers ────────────────────────────
