@@ -175,6 +175,75 @@
   display: none;
 }
 
+/* ── R/R Preview Box ── */
+
+#msp-rr-box {
+  background: #0e1119;
+  border: 1px solid #2a2d3a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 9px;
+}
+
+.msp-rr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 7px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #4a4e5c;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
+.msp-rr-entry-price {
+  font-size: 11px;
+  font-weight: 600;
+  color: #787b86;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.msp-rr-entry-price.na {
+  color: #4a4e5c;
+  font-style: italic;
+}
+
+.msp-rr-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+}
+
+.msp-rr-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.msp-rr-label {
+  font-size: 9px;
+  color: #4a4e5c;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.msp-rr-val {
+  font-size: 12px;
+  font-weight: 700;
+  color: #787b86;
+}
+
+.msp-rr-val.profit { color: #089981; }
+.msp-rr-val.loss   { color: #f23645; }
+
+.msp-rr-val.ratio      { color: #d1d4dc; }
+.msp-rr-val.ratio.good { color: #089981; }
+.msp-rr-val.ratio.bad  { color: #f23645; }
+.msp-rr-val.warn       { color: #f0b90b; font-size: 10px; }
+
 /* ── Divider ── */
 
 .msp-divider {

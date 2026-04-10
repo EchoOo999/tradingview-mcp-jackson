@@ -46,6 +46,47 @@
     return s;
   }
 
+  // ─── Current Price Detection ───────────────────────────────────────────────
+
+  function getCurrentPrice() {
+    // Try DOM selectors in order of reliability
+    const selectors = [
+      // Price in chart legend / header bar
+      '[class*="priceWrapper"] [class*="last"]',
+      '[class*="lastPrice"]',
+      '[class*="price-last"]',
+      // Symbol info bar (top of chart)
+      '[class*="symbolInfo"] [class*="last"]',
+      '[class*="symbol-info"] [class*="last"]',
+      // Pane legend price
+      '[class*="paneRow"] [class*="price"]',
+      '[class*="mainSeries"] [class*="price"]',
+      // Broad fallback: any element whose text looks like a price
+    ];
+
+    for (const sel of selectors) {
+      try {
+        const el = document.querySelector(sel);
+        if (el) {
+          const n = parseFloat(el.textContent.replace(/[^0-9.]/g, ''));
+          if (n > 0) return n;
+        }
+      } catch (_) {}
+    }
+
+    // Last resort: scan all elements with "price" in className for a numeric value
+    try {
+      const candidates = document.querySelectorAll('[class*="price"]');
+      for (const el of candidates) {
+        if (el.children.length > 0) continue; // skip containers
+        const n = parseFloat(el.textContent.replace(/[^0-9.]/g, ''));
+        if (n > 100) return n; // price must be > 100 to avoid matching tiny values
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
   // ─── Build Panel HTML ──────────────────────────────────────────────────────
 
   const panel = document.createElement('div');
@@ -102,6 +143,32 @@
         </div>
       </div>
 
+      <!-- R/R Preview -->
+      <div id="msp-rr-box">
+        <div class="msp-rr-header">
+          <span>R/R PREVIEW</span>
+          <span id="msp-rr-entry-price" class="msp-rr-entry-price">—</span>
+        </div>
+        <div class="msp-rr-grid">
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Profit (TP)</span>
+            <span id="msp-rr-profit" class="msp-rr-val profit">—</span>
+          </div>
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Loss (SL)</span>
+            <span id="msp-rr-loss" class="msp-rr-val loss">—</span>
+          </div>
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">R/R Ratio</span>
+            <span id="msp-rr-ratio" class="msp-rr-val ratio">—</span>
+          </div>
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Position</span>
+            <span id="msp-rr-size" class="msp-rr-val">—</span>
+          </div>
+        </div>
+      </div>
+
       <div class="msp-divider"></div>
 
       <!-- Order Buttons -->
@@ -139,9 +206,113 @@
 
   // Show/hide entry price field based on order type
   document.getElementById('msp-type-toggle').addEventListener('change', (e) => {
-    const entryRow = document.getElementById('msp-entry-row');
-    entryRow.classList.toggle('hidden', e.detail !== 'limit');
+    document.getElementById('msp-entry-row').classList.toggle('hidden', e.detail !== 'limit');
+    updatePreview();
   });
+
+  // ─── R/R Preview ───────────────────────────────────────────────────────────
+
+  function fmt(n, decimals = 2) {
+    return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  }
+
+  function updatePreview() {
+    const elProfit = document.getElementById('msp-rr-profit');
+    const elLoss   = document.getElementById('msp-rr-loss');
+    const elRatio  = document.getElementById('msp-rr-ratio');
+    const elSize   = document.getElementById('msp-rr-size');
+    const elEntry  = document.getElementById('msp-rr-entry-price');
+
+    const leverage = parseFloat(document.getElementById('msp-leverage').value) || 0;
+    const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
+    const tp       = parseFloat(document.getElementById('msp-tp').value)       || 0;
+    const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
+    const isLimit  = typeToggle.getValue() === 'limit';
+    const limitPx  = parseFloat(document.getElementById('msp-entry').value)    || 0;
+
+    // Resolve entry price
+    const chartPrice = getCurrentPrice();
+    const entry = isLimit ? (limitPx || chartPrice) : chartPrice;
+
+    if (!entry || entry <= 0) {
+      elEntry.textContent = 'price N/A';
+      elEntry.className = 'msp-rr-entry-price na';
+      [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+      return;
+    }
+
+    elEntry.textContent = '$' + fmt(entry);
+    elEntry.className = 'msp-rr-entry-price';
+
+    // Position size (base currency units)
+    const notional = usdRisk * leverage;
+    const contracts = notional / entry;
+    elSize.textContent = fmt(contracts, 4) + ' units';
+
+    if ((!tp && !sl) || leverage <= 0 || usdRisk <= 0) {
+      [elProfit, elLoss, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+      return;
+    }
+
+    // Infer direction: tp > entry → long, tp < entry → short
+    // Fall back to sl if tp not set
+    let isLong;
+    if (tp > 0)      isLong = tp > entry;
+    else if (sl > 0) isLong = sl < entry;
+    else             isLong = true;
+
+    const tpDelta = tp > 0 ? Math.abs(tp - entry) : 0;
+    const slDelta = sl > 0 ? Math.abs(entry - sl)  : 0;
+
+    // Validate direction consistency
+    if (tp > 0 && sl > 0) {
+      const tpCorrect = isLong ? tp > entry : tp < entry;
+      const slCorrect = isLong ? sl < entry : sl > entry;
+      if (!tpCorrect || !slCorrect) {
+        elRatio.textContent = '⚠ check prices';
+        elRatio.className = 'msp-rr-val warn';
+      }
+    }
+
+    if (tp > 0) {
+      const profit = contracts * tpDelta;
+      elProfit.textContent = '+$' + fmt(profit);
+      elProfit.className = 'msp-rr-val profit';
+    } else {
+      elProfit.textContent = '—';
+      elProfit.className = 'msp-rr-val';
+    }
+
+    if (sl > 0) {
+      const loss = contracts * slDelta;
+      elLoss.textContent = '-$' + fmt(loss);
+      elLoss.className = 'msp-rr-val loss';
+    } else {
+      elLoss.textContent = '—';
+      elLoss.className = 'msp-rr-val';
+    }
+
+    if (tp > 0 && sl > 0 && slDelta > 0) {
+      const ratio = tpDelta / slDelta;
+      elRatio.textContent = '1 : ' + fmt(ratio);
+      elRatio.className = 'msp-rr-val ratio' + (ratio >= 1.5 ? ' good' : ratio < 1 ? ' bad' : '');
+    } else if (!(tp > 0 && sl > 0)) {
+      elRatio.textContent = '—';
+      elRatio.className = 'msp-rr-val';
+    }
+  }
+
+  // Wire live updates to all relevant inputs
+  ['msp-leverage', 'msp-risk', 'msp-tp', 'msp-sl', 'msp-entry'].forEach(id => {
+    document.getElementById(id).addEventListener('input', updatePreview);
+  });
+  document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
+
+  // Poll chart price every 2s to keep entry price live
+  setInterval(updatePreview, 2000);
+
+  // Initial render
+  setTimeout(updatePreview, 500);
 
   // ─── Symbol Badge ──────────────────────────────────────────────────────────
 
