@@ -57,7 +57,6 @@ app.post('/webhook', async (req, res) => {
   if (!type)                  missing.push('type');
   if (!leverage)              missing.push('leverage');
   if (!usd_risk)              missing.push('usd_risk');
-  if (!sl)                    missing.push('sl');
   if (type === 'limit' && !price) missing.push('price (required for limit orders)');
 
   if (missing.length > 0) {
@@ -75,7 +74,7 @@ app.post('/webhook', async (req, res) => {
       usd_risk: Number(usd_risk),
       price:    price ? Number(price) : undefined,
       tp:       tp    ? Number(tp)    : undefined,
-      sl:       Number(sl),
+      sl:       sl ? Number(sl) : undefined,
       apiKey:   API_KEY,
       apiSecret: API_SECRET,
     });
