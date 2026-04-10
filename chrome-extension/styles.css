@@ -238,6 +238,19 @@
 .msp-rr-val.ratio.bad  { color: #f23645; }
 .msp-rr-val.warn       { color: #f0b90b; font-size: 10px; }
 
+.msp-min-warn {
+  font-size: 10px;
+  font-weight: 700;
+  color: #f0b90b;
+  background: rgba(240, 185, 11, 0.08);
+  border: 1px solid rgba(240, 185, 11, 0.25);
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin-bottom: 7px;
+  text-align: center;
+  letter-spacing: 0.2px;
+}
+
 /* ── Divider ── */
 
 .msp-divider {

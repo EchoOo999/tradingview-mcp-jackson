@@ -195,6 +195,7 @@
         <div class="msp-rr-header">
           <span>R/R PREVIEW</span>
         </div>
+        <div id="msp-min-warn" class="msp-min-warn" style="display:none"></div>
         <div class="msp-rr-grid">
           <div class="msp-rr-cell">
             <span class="msp-rr-label">Profit (TP)</span>
@@ -324,16 +325,18 @@
     const entry    = parseFloat(entryInput.value)                              || 0;
 
     const reset = (...els) => els.forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+    const warnEl = document.getElementById('msp-min-warn');
 
     // USD Risk = max loss — always fixed
     // Need entry + SL to compute position size
     if (entry <= 0 || sl <= 0 || usdRisk <= 0) {
       reset(elLoss, elProfit, elRatio, elSize, elMargin);
+      warnEl.style.display = 'none';
       return;
     }
 
     const slDistPct = Math.abs(entry - sl) / entry;
-    if (slDistPct <= 0) { reset(elLoss, elProfit, elRatio, elSize, elMargin); return; }
+    if (slDistPct <= 0) { reset(elLoss, elProfit, elRatio, elSize, elMargin); warnEl.style.display = 'none'; return; }
 
     // Direction check — warn if TP and SL are on wrong sides
     if (tp > 0) {
@@ -342,6 +345,7 @@
         reset(elLoss, elProfit, elSize, elMargin);
         elRatio.textContent = '⚠ TP/SL sides wrong';
         elRatio.className   = 'msp-rr-val warn';
+        warnEl.style.display = 'none';
         return;
       }
     }
@@ -351,6 +355,15 @@
     const contracts    = positionSize / entry;
     const loss         = usdRisk;                        // always = USD Risk
     const margin       = leverage > 0 ? positionSize / leverage : 0;
+
+    // Minimum risk warning: min 1 contract → minRisk = entry × slDistPct
+    const minRisk = entry * slDistPct;
+    if (contracts < 1) {
+      warnEl.textContent = '⚠ Too small — Min Risk: $' + fmt(minRisk);
+      warnEl.style.display = 'block';
+    } else {
+      warnEl.style.display = 'none';
+    }
 
     elLoss.textContent = '-$' + fmt(loss);
     elLoss.className   = 'msp-rr-val loss';
