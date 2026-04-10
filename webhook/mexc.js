@@ -50,21 +50,41 @@ async function request(method, path, body, apiKey, apiSecret) {
 }
 
 /**
- * Fetch USDT balance from MEXC Futures API (/api/v1/private/account/assets).
- * Returns:
- *   available    — free to open new positions
- *   equity       — available + position margin + unrealized PnL
- *   total_wallet — cashBalance (deposited funds, excl. unrealized PnL)
+ * Fetch total USDT balance across Spot + Futures accounts.
+ * - Spot:    GET https://api.mexc.com/api/v3/account  (HMAC-SHA256 on queryString)
+ * - Futures: GET /api/v1/private/account/assets        (existing futures auth)
+ * Returns { total } = spot USDT (free+locked) + futures USDT equity.
  */
 export async function getBalance(apiKey, apiSecret) {
-  const assets = await request('GET', '/api/v1/private/account/assets', null, apiKey, apiSecret);
-  const usdt = (assets || []).find(a => a.currency === 'USDT');
-  if (!usdt) throw new Error('USDT asset not found in futures account');
-  return {
-    available:    parseFloat(usdt.availableBalance ?? 0),
-    equity:       parseFloat(usdt.equity           ?? 0),
-    total_wallet: parseFloat(usdt.cashBalance      ?? usdt.equity ?? 0),
-  };
+  // Run both calls in parallel
+  const [spotData, futuresAssets] = await Promise.all([
+    // ── Spot API ──────────────────────────────────────────────────────────────
+    (async () => {
+      const ts  = Date.now().toString();
+      const qs  = `timestamp=${ts}`;
+      const sig = crypto.createHmac('sha256', apiSecret).update(qs).digest('hex');
+      const res = await fetch(`https://api.mexc.com/api/v3/account?${qs}&signature=${sig}`, {
+        headers: { 'X-MEXC-APIKEY': apiKey },
+      });
+      const json = await res.json();
+      if (json.code) throw new Error(`Spot API: ${json.msg || json.message}`);
+      return json;
+    })(),
+    // ── Futures API ───────────────────────────────────────────────────────────
+    request('GET', '/api/v1/private/account/assets', null, apiKey, apiSecret),
+  ]);
+
+  // Spot USDT
+  const spotUsdt  = (spotData.balances || []).find(b => b.asset === 'USDT');
+  const spotTotal = spotUsdt
+    ? parseFloat(spotUsdt.free || 0) + parseFloat(spotUsdt.locked || 0)
+    : 0;
+
+  // Futures USDT equity (includes unrealized PnL)
+  const futUsdt    = (futuresAssets || []).find(a => a.currency === 'USDT');
+  const futEquity  = futUsdt ? parseFloat(futUsdt.equity ?? 0) : 0;
+
+  return { total: spotTotal + futEquity };
 }
 
 /**

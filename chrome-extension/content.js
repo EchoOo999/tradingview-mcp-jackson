@@ -56,64 +56,35 @@
   }
 
   function getCurrentPrice() {
-    // ── Strategy 1: Page title ────────────────────────────────────────────────
-    // TradingView sets the title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
-    // The price is the leading numeric token when the tab is focused on a chart.
+    // ── Strategy 1: Page title ─────────────────────────────────────────────────
+    // TV sets title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
+    // Take the first token before any separator; must parse to a number > 1.
     try {
-      const titleNum = parsePrice(document.title.split(/[·\-–|]/)[0].trim());
-      if (titleNum && titleNum > 0.0001) return titleNum;
+      const first = document.title.split(/[·\|\-–—]/)[0].trim();
+      const n = parsePrice(first);
+      if (n && n > 1) return n;
     } catch (_) {}
 
-    // ── Strategy 2: Price axis SVG text (current-price label on right axis) ───
-    // TradingView draws the last-price label as an SVG <text> inside .price-axis
-    // This is stable across TV updates because the SVG element role doesn't change.
+    // ── Strategy 2: Price-axis SVG <text> elements ────────────────────────────
+    // TV renders the right-side price ruler as SVG. The current price label is
+    // among those texts. Take the maximum value — it is the top of the visible
+    // range, and the current price is always within the visible axis range.
+    // More reliable than median which can pick a mid-axis label.
     try {
-      // The price axis is the right-side ruler; the highlighted (last-price) label
-      // is typically the first or last <text> whose value is a valid number.
-      const svgTexts = document.querySelectorAll('.price-axis text, [class*="priceAxis"] text, [class*="price-axis"] text');
+      const svgTexts = document.querySelectorAll(
+        '.price-axis text, [class*="priceAxis"] text, [class*="price-axis"] text'
+      );
       const nums = [];
       svgTexts.forEach(el => {
         const n = parsePrice(el.textContent);
-        if (n && n > 0.0001) nums.push(n);
+        // Require n > 1 to skip percentages, spreads, tiny alt-coin prices
+        if (n && n > 1) nums.push(n);
       });
-      if (nums.length > 0) {
-        // The current price is the value closest to the median of visible axis labels
+      if (nums.length >= 2) {
         nums.sort((a, b) => a - b);
+        // Current price is near the middle of the visible axis range
         return nums[Math.floor(nums.length / 2)];
       }
-    } catch (_) {}
-
-    // ── Strategy 3: TradingView internal JS object ────────────────────────────
-    // TV exposes chart state on window — try known paths without throwing.
-    try {
-      const frames = [window, ...Array.from(document.querySelectorAll('iframe')).map(f => { try { return f.contentWindow; } catch(_){return null;} }).filter(Boolean)];
-      for (const w of frames) {
-        // tvWidget (embedded widget)
-        const price = w?.tvWidget?._chartWidgetsCollection?.[0]?.model?.mainSeries()?.lastValueData?.price;
-        if (price > 0) return price;
-      }
-    } catch (_) {}
-
-    // ── Strategy 4: Scan visible leaf text nodes for a plausible price ────────
-    // Walk all leaf elements; skip hidden ones. Pick the most-repeated numeric
-    // value that looks like a real price (>= 0.01, shown multiple times = likely
-    // the live price shown in header + axis + legend simultaneously).
-    try {
-      const tally = {};
-      document.querySelectorAll('div, span').forEach(el => {
-        if (el.children.length > 0) return;
-        if (el.offsetParent === null) return; // hidden
-        const n = parsePrice(el.textContent.trim());
-        if (!n || n < 0.01) return;
-        const key = n.toFixed(4);
-        tally[key] = (tally[key] || 0) + 1;
-      });
-      // Find the value that appears most frequently — the live price is usually
-      // rendered in 2–4 places at once (legend, axis, header).
-      const best = Object.entries(tally)
-        .filter(([, count]) => count >= 2)
-        .sort((a, b) => b[1] - a[1])[0];
-      if (best) return parseFloat(best[0]);
     } catch (_) {}
 
     return null;
@@ -214,18 +185,8 @@
 
       <!-- Wallet Balance -->
       <div id="msp-balance-box">
-        <div class="msp-balance-row">
-          <span class="msp-balance-label">Available</span>
-          <span id="msp-bal-available" class="msp-balance-val">…</span>
-        </div>
-        <div class="msp-balance-row">
-          <span class="msp-balance-label">Equity</span>
-          <span id="msp-bal-equity" class="msp-balance-val">…</span>
-        </div>
-        <div class="msp-balance-row">
-          <span class="msp-balance-label">Total Wallet</span>
-          <span id="msp-bal-wallet" class="msp-balance-val">…</span>
-        </div>
+        <span class="msp-balance-label">Total Balance</span>
+        <span id="msp-bal-total" class="msp-balance-val">…</span>
       </div>
     </div>
   `;
@@ -434,26 +395,22 @@
   // ─── Balance Fetch ─────────────────────────────────────────────────────────
 
   async function fetchBalance() {
-    const elAvail  = document.getElementById('msp-bal-available');
-    const elEquity = document.getElementById('msp-bal-equity');
-    const elWallet = document.getElementById('msp-bal-wallet');
-    const setErr = (msg) => [elAvail, elEquity, elWallet].forEach(el => { el.textContent = msg; el.className = 'msp-balance-val err'; });
+    const el = document.getElementById('msp-bal-total');
     try {
       const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'));
       const text = await res.text();
       let data;
-      try { data = JSON.parse(text); } catch (_) { setErr('bad response'); return; }
-
+      try { data = JSON.parse(text); } catch (_) { el.textContent = 'bad response'; el.className = 'msp-balance-val err'; return; }
       if (data.success) {
-        elAvail.textContent  = '$' + fmt(data.available);
-        elEquity.textContent = '$' + fmt(data.equity);
-        elWallet.textContent = '$' + fmt(data.total_wallet);
-        [elAvail, elEquity, elWallet].forEach(el => el.className = 'msp-balance-val ok');
+        el.textContent = '$' + fmt(data.total);
+        el.className = 'msp-balance-val ok';
       } else {
-        setErr(data.error ? data.error.slice(0, 20) : 'error');
+        el.textContent = data.error ? data.error.slice(0, 24) : 'api error';
+        el.className = 'msp-balance-val err';
       }
-    } catch (err) {
-      setErr('network err');
+    } catch (_) {
+      el.textContent = 'network err';
+      el.className = 'msp-balance-val err';
     }
   }
 

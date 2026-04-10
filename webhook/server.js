@@ -41,8 +41,8 @@ app.get('/', (req, res) => res.json({ status: 'ok', service: 'mexc-webhook' }));
 // Wallet balance
 app.get('/balance', async (req, res) => {
   try {
-    const { available, equity, total_wallet } = await getBalance(API_KEY, API_SECRET);
-    return res.json({ success: true, available, equity, total_wallet });
+    const { total } = await getBalance(API_KEY, API_SECRET);
+    return res.json({ success: true, total });
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Balance fetch failed: ${err.message}`);
     return res.status(500).json({ success: false, error: err.message });

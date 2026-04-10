@@ -329,24 +329,14 @@
 /* ── Wallet Balance ── */
 
 #msp-balance-box {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   background: #0e1119;
   border: 1px solid #2a2d3a;
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 7px 10px;
   margin-top: 8px;
-  gap: 4px 6px;
-}
-
-.msp-balance-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.msp-balance-row:last-child {
-  text-align: right;
 }
 
 .msp-balance-label {
