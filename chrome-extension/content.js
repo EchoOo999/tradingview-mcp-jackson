@@ -114,11 +114,11 @@
         <button class="msp-toggle-btn" data-value="limit">Limit</button>
       </div>
 
-      <!-- Entry Price (Limit only) -->
-      <div id="msp-entry-row" class="hidden">
+      <!-- Entry Price (always visible) -->
+      <div id="msp-entry-row">
         <div class="msp-field full">
-          <span class="msp-label">Entry Price</span>
-          <input id="msp-entry" class="msp-input" type="number" min="0" step="any" placeholder="Limit price" />
+          <span class="msp-label" id="msp-entry-label">Entry Price</span>
+          <input id="msp-entry" class="msp-input" type="number" min="0" step="any" placeholder="Current price (for calc)" />
         </div>
       </div>
 
@@ -150,8 +150,6 @@
       <div id="msp-rr-box">
         <div class="msp-rr-header">
           <span>R/R PREVIEW</span>
-          <input id="msp-rr-entry-px" class="msp-rr-entry-input" type="number"
-                 step="any" min="0" placeholder="type entry $" title="Auto-filled from chart price. Type to override." />
         </div>
         <div class="msp-rr-grid">
           <div class="msp-rr-cell">
@@ -214,9 +212,10 @@
   const marginToggle = wireToggle('msp-margin-toggle');
   const typeToggle   = wireToggle('msp-type-toggle');
 
-  // Show/hide entry price field based on order type
+  // Update entry label when order type changes
   document.getElementById('msp-type-toggle').addEventListener('change', (e) => {
-    document.getElementById('msp-entry-row').classList.toggle('hidden', e.detail !== 'limit');
+    document.getElementById('msp-entry-label').textContent =
+      e.detail === 'limit' ? 'Entry Price (Limit)' : 'Entry Price';
     updatePreview();
   });
 
@@ -226,25 +225,16 @@
     return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   }
 
-  const entryPxInput = document.getElementById('msp-rr-entry-px');
+  const entryInput = document.getElementById('msp-entry');
 
-  // Track whether user has manually typed an entry price
-  entryPxInput.addEventListener('input', () => {
-    entryPxInput.dataset.userSet = entryPxInput.value ? '1' : '';
-    updatePreview();
-  });
-
-  // Auto-populate entry price from chart (only when user hasn't overridden)
+  // Auto-populate entry from chart price only when field is empty
   function syncEntryPrice() {
-    if (entryPxInput.dataset.userSet) return;         // user typed → don't overwrite
-    const isLimit = typeToggle.getValue() === 'limit';
-    const limitPx = parseFloat(document.getElementById('msp-entry').value) || 0;
-    if (isLimit && limitPx > 0) {
-      entryPxInput.value = limitPx;
-      return;
-    }
+    if (entryInput.value) return;           // user has typed something — don't overwrite
     const p = getCurrentPrice();
-    if (p && p > 0) entryPxInput.value = p;
+    if (p && p > 0) {
+      entryInput.value = p;
+      updatePreview();
+    }
   }
 
   function updatePreview() {
@@ -257,7 +247,7 @@
     const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
     const tp       = parseFloat(document.getElementById('msp-tp').value)       || 0;
     const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
-    const entry    = parseFloat(entryPxInput.value)                            || 0;
+    const entry    = parseFloat(entryInput.value)                              || 0;
 
     // ── Step 1: Position size — needs only margin × leverage ─────────────────
     if (usdRisk > 0 && leverage > 0) {
@@ -322,15 +312,15 @@
     elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
   }
 
-  // Wire live updates
-  ['msp-leverage', 'msp-risk', 'msp-tp', 'msp-sl', 'msp-entry'].forEach(id =>
+  // Wire live updates on all inputs
+  ['msp-entry', 'msp-leverage', 'msp-risk', 'msp-tp', 'msp-sl'].forEach(id =>
     document.getElementById(id).addEventListener('input', updatePreview)
   );
   document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
 
-  // Sync chart price + recalculate every 2s
-  setInterval(() => { syncEntryPrice(); updatePreview(); }, 2000);
-  setTimeout(() => { syncEntryPrice(); updatePreview(); }, 800);
+  // Try to auto-fill entry from chart every 2s (only when entry field is empty)
+  setInterval(syncEntryPrice, 2000);
+  setTimeout(syncEntryPrice, 800);
 
   // ─── Symbol Badge ──────────────────────────────────────────────────────────
 
