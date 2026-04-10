@@ -315,18 +315,6 @@
     const slDistPct = Math.abs(entry - sl) / entry;
     if (slDistPct <= 0) { reset(elLoss, elProfit, elRatio, elSize, elMargin); warnEl.style.display = 'none'; return; }
 
-    // Direction check — warn if TP and SL are on wrong sides
-    if (tp > 0) {
-      const isLong = sl < entry;
-      if ((isLong && tp < entry) || (!isLong && tp > entry)) {
-        reset(elLoss, elProfit, elSize, elMargin);
-        elRatio.textContent = '⚠ TP/SL sides wrong';
-        elRatio.className   = 'msp-rr-val warn';
-        warnEl.style.display = 'none';
-        return;
-      }
-    }
-
     // Core formulas
     const positionSize = usdRisk / slDistPct;           // USD notional
     const contracts    = positionSize / entry;
