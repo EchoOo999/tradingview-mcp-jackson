@@ -209,8 +209,12 @@
             <span id="msp-rr-ratio" class="msp-rr-val ratio">—</span>
           </div>
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Position</span>
+            <span class="msp-rr-label">Position Size</span>
             <span id="msp-rr-size" class="msp-rr-val">—</span>
+          </div>
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Margin Required</span>
+            <span id="msp-rr-margin" class="msp-rr-val">—</span>
           </div>
         </div>
       </div>
@@ -311,6 +315,7 @@
     const elLoss   = document.getElementById('msp-rr-loss');
     const elRatio  = document.getElementById('msp-rr-ratio');
     const elSize   = document.getElementById('msp-rr-size');
+    const elMargin = document.getElementById('msp-rr-margin');
 
     const leverage = parseFloat(document.getElementById('msp-leverage').value) || 0;
     const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
@@ -318,63 +323,52 @@
     const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
     const entry    = parseFloat(entryInput.value)                              || 0;
 
-    // ── Step 1: Position size — needs only margin × leverage ─────────────────
-    if (usdRisk > 0 && leverage > 0) {
-      const posSize = usdRisk * leverage;
-      elSize.textContent = '$' + fmt(posSize, 2);
-      elSize.className = 'msp-rr-val';
-    } else {
-      elSize.textContent = '—'; elSize.className = 'msp-rr-val';
-    }
+    const reset = (...els) => els.forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
 
-    // ── Steps 2-4: need entry price ───────────────────────────────────────────
-    if (entry <= 0) {
-      [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+    // USD Risk = max loss — always fixed
+    // Need entry + SL to compute position size
+    if (entry <= 0 || sl <= 0 || usdRisk <= 0) {
+      reset(elLoss, elProfit, elRatio, elSize, elMargin);
       return;
     }
 
-    // ── MEXC Futures margin-based sizing ──────────────────────────────────────
-    // contracts = (margin × leverage) / entry
-    // loss      = contracts × |entry − sl|    = (margin × leverage / entry) × |entry − sl|
-    // profit    = contracts × |tp − entry|
-    // R/R       = profit / loss
-    const contracts = (usdRisk * leverage) / entry;
+    const slDistPct = Math.abs(entry - sl) / entry;
+    if (slDistPct <= 0) { reset(elLoss, elProfit, elRatio, elSize, elMargin); return; }
 
-    // ── Step 2: Loss (needs SL) ───────────────────────────────────────────────
-    if (sl <= 0) {
-      [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
-      return;
-    }
-
-    // Direction check — only warn if both TP and SL are set and inconsistent
+    // Direction check — warn if TP and SL are on wrong sides
     if (tp > 0) {
       const isLong = sl < entry;
-      const tpBadSide = isLong ? tp < entry : tp > entry;
-      const slBadSide = isLong ? sl > entry : sl < entry;
-      if (tpBadSide || slBadSide) {
-        elLoss.textContent = elProfit.textContent = '—';
-        elLoss.className = elProfit.className = 'msp-rr-val';
+      if ((isLong && tp < entry) || (!isLong && tp > entry)) {
+        reset(elLoss, elProfit, elSize, elMargin);
         elRatio.textContent = '⚠ TP/SL sides wrong';
         elRatio.className   = 'msp-rr-val warn';
         return;
       }
     }
 
-    const slDelta = Math.abs(entry - sl);
-    const loss    = contracts * slDelta;
+    // Core formulas
+    const positionSize = usdRisk / slDistPct;           // USD notional
+    const contracts    = positionSize / entry;
+    const loss         = usdRisk;                        // always = USD Risk
+    const margin       = leverage > 0 ? positionSize / leverage : 0;
+
     elLoss.textContent = '-$' + fmt(loss);
     elLoss.className   = 'msp-rr-val loss';
 
-    // ── Step 3: Profit + R/R (needs TP) ──────────────────────────────────────
+    elSize.textContent = '$' + fmt(positionSize);
+    elSize.className   = 'msp-rr-val';
+
+    elMargin.textContent = leverage > 0 ? '$' + fmt(margin) : '—';
+    elMargin.className   = 'msp-rr-val';
+
     if (tp <= 0) {
-      elProfit.textContent = '—'; elProfit.className = 'msp-rr-val';
-      elRatio.textContent  = '—'; elRatio.className  = 'msp-rr-val';
+      reset(elProfit, elRatio);
       return;
     }
 
-    const tpDelta = Math.abs(tp - entry);
-    const profit  = contracts * tpDelta;
-    const ratio   = profit / loss;
+    const profit = contracts * Math.abs(tp - entry);
+    const ratio  = profit / loss;
+
     elProfit.textContent = '+$' + fmt(profit);
     elProfit.className   = 'msp-rr-val profit';
     elRatio.textContent  = '1 : ' + fmt(ratio);
