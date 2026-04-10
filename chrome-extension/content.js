@@ -179,7 +179,8 @@
       <div id="msp-rr-box">
         <div class="msp-rr-header">
           <span>R/R PREVIEW</span>
-          <span id="msp-rr-entry-price" class="msp-rr-entry-price">—</span>
+          <input id="msp-rr-entry-px" class="msp-rr-entry-input" type="number"
+                 step="any" min="0" placeholder="entry price" title="Auto-filled from chart. Type to override." />
         </div>
         <div class="msp-rr-grid">
           <div class="msp-rr-cell">
@@ -264,99 +265,96 @@
     return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   }
 
+  const entryPxInput = document.getElementById('msp-rr-entry-px');
+
+  // Track whether user has manually typed an entry price
+  entryPxInput.addEventListener('input', () => {
+    entryPxInput.dataset.userSet = entryPxInput.value ? '1' : '';
+    updatePreview();
+  });
+
+  // Auto-populate entry price from chart (only when user hasn't overridden)
+  function syncEntryPrice() {
+    if (entryPxInput.dataset.userSet) return;         // user typed → don't overwrite
+    const isLimit = typeToggle.getValue() === 'limit';
+    const limitPx = parseFloat(document.getElementById('msp-entry').value) || 0;
+    if (isLimit && limitPx > 0) {
+      entryPxInput.value = limitPx;
+      return;
+    }
+    const p = getCurrentPrice();
+    if (p && p > 0) entryPxInput.value = p;
+  }
+
   function updatePreview() {
     const elProfit = document.getElementById('msp-rr-profit');
     const elLoss   = document.getElementById('msp-rr-loss');
     const elRatio  = document.getElementById('msp-rr-ratio');
     const elSize   = document.getElementById('msp-rr-size');
-    const elEntry  = document.getElementById('msp-rr-entry-price');
 
     const leverage = parseFloat(document.getElementById('msp-leverage').value) || 0;
     const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
     const tp       = parseFloat(document.getElementById('msp-tp').value)       || 0;
     const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
-    const isLimit  = typeToggle.getValue() === 'limit';
-    const limitPx  = parseFloat(document.getElementById('msp-entry').value)    || 0;
+    const entry    = parseFloat(entryPxInput.value)                            || 0;
 
-    // Resolve entry price
-    const chartPrice = getCurrentPrice();
-    const entry = isLimit ? (limitPx || chartPrice) : chartPrice;
+    const blank = () => [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
 
-    if (!entry || entry <= 0) {
-      elEntry.textContent = 'price N/A';
-      elEntry.className = 'msp-rr-entry-price na';
-      [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
-      return;
+    if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { blank(); return; }
+
+    // ── MEXC Futures margin-based position sizing ─────────────────────────────
+    // margin (USD Risk) × leverage  = position notional (USDT)
+    // position notional / entry     = contracts (base-currency units)
+    // contracts × |entry − sl|      = max loss  at SL
+    // contracts × |tp − entry|      = profit    at TP
+    // R/R = profit / loss
+
+    const posSize   = usdRisk * leverage;
+    const contracts = posSize / entry;
+    elSize.textContent = fmt(posSize, 2) + ' USDT';
+
+    if (sl <= 0) { [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; }); return; }
+
+    // Direction check (only if both TP and SL are set)
+    if (tp > 0) {
+      const isLong = sl < entry;
+      if ((isLong && (tp <= entry || sl >= entry)) || (!isLong && (tp >= entry || sl <= entry))) {
+        elLoss.textContent = elProfit.textContent = '—';
+        elLoss.className = elProfit.className = 'msp-rr-val';
+        elRatio.textContent = '⚠ check TP/SL sides';
+        elRatio.className   = 'msp-rr-val warn';
+        return;
+      }
     }
 
-    elEntry.textContent = '$' + fmt(entry);
-    elEntry.className = 'msp-rr-entry-price';
+    const slDelta = Math.abs(entry - sl);
+    const loss    = contracts * slDelta;
+    elLoss.textContent = '-$' + fmt(loss);
+    elLoss.className   = 'msp-rr-val loss';
 
-    if (usdRisk <= 0 || leverage <= 0) {
-      [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
-      return;
-    }
-
-    // ── MEXC native margin-based position sizing ──────────────────────────────
-    // USD Risk = margin posted (collateral)
-    // position_size (USDT) = margin × leverage
-    // contracts            = position_size / entry
-    // loss  (SL hit)       = contracts × |entry − sl|
-    // profit (TP hit)      = contracts × |tp − entry|
-    // R/R                  = profit / loss
-
-    const positionSize = usdRisk * leverage;               // USDT notional
-    const contracts    = positionSize / entry;             // base currency units
-    elSize.textContent = fmt(positionSize, 2) + ' USDT (' + fmt(contracts, 4) + ')';
-
-    if (sl > 0) {
-      // Validate TP/SL direction consistency before showing numbers
-      if (tp > 0) {
-        const isLong = sl < entry;
-        const tpWrongSide = isLong ? tp <= entry : tp >= entry;
-        const slWrongSide = isLong ? sl >= entry : sl <= entry;
-        if (tpWrongSide || slWrongSide) {
-          elProfit.textContent = '—';   elProfit.className = 'msp-rr-val';
-          elLoss.textContent   = '—';   elLoss.className   = 'msp-rr-val';
-          elRatio.textContent  = '⚠ check prices';
-          elRatio.className    = 'msp-rr-val warn';
-          return;
-        }
-      }
-
-      const slDelta = Math.abs(entry - sl);
-      const loss    = contracts * slDelta;
-      elLoss.textContent = '-$' + fmt(loss);
-      elLoss.className   = 'msp-rr-val loss';
-
-      if (tp > 0) {
-        const tpDelta = Math.abs(tp - entry);
-        const profit  = contracts * tpDelta;
-        const ratio   = profit / loss;
-        elProfit.textContent = '+$' + fmt(profit);
-        elProfit.className   = 'msp-rr-val profit';
-        elRatio.textContent  = '1 : ' + fmt(ratio);
-        elRatio.className    = 'msp-rr-val ratio' + (ratio >= 1.5 ? ' good' : ratio < 1 ? ' bad' : '');
-      } else {
-        elProfit.textContent = '—'; elProfit.className = 'msp-rr-val';
-        elRatio.textContent  = '—'; elRatio.className  = 'msp-rr-val';
-      }
+    if (tp > 0) {
+      const tpDelta = Math.abs(tp - entry);
+      const profit  = contracts * tpDelta;
+      const ratio   = profit / loss;
+      elProfit.textContent = '+$' + fmt(profit);
+      elProfit.className   = 'msp-rr-val profit';
+      elRatio.textContent  = '1 : ' + fmt(ratio);
+      elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
     } else {
-      [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+      elProfit.textContent = '—'; elProfit.className = 'msp-rr-val';
+      elRatio.textContent  = '—'; elRatio.className  = 'msp-rr-val';
     }
   }
 
-  // Wire live updates to all relevant inputs
-  ['msp-leverage', 'msp-risk', 'msp-tp', 'msp-sl', 'msp-entry'].forEach(id => {
-    document.getElementById(id).addEventListener('input', updatePreview);
-  });
+  // Wire live updates
+  ['msp-leverage', 'msp-risk', 'msp-tp', 'msp-sl', 'msp-entry'].forEach(id =>
+    document.getElementById(id).addEventListener('input', updatePreview)
+  );
   document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
 
-  // Poll chart price every 2s to keep entry price live
-  setInterval(updatePreview, 2000);
-
-  // Initial render
-  setTimeout(updatePreview, 500);
+  // Sync chart price + recalculate every 2s
+  setInterval(() => { syncEntryPrice(); updatePreview(); }, 2000);
+  setTimeout(() => { syncEntryPrice(); updatePreview(); }, 800);
 
   // ─── Symbol Badge ──────────────────────────────────────────────────────────
 
@@ -439,19 +437,23 @@
     const elAvail  = document.getElementById('msp-bal-available');
     const elEquity = document.getElementById('msp-bal-equity');
     const elWallet = document.getElementById('msp-bal-wallet');
+    const setErr = (msg) => [elAvail, elEquity, elWallet].forEach(el => { el.textContent = msg; el.className = 'msp-balance-val err'; });
     try {
       const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'));
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch (_) { setErr('bad response'); return; }
+
       if (data.success) {
         elAvail.textContent  = '$' + fmt(data.available);
         elEquity.textContent = '$' + fmt(data.equity);
         elWallet.textContent = '$' + fmt(data.total_wallet);
         [elAvail, elEquity, elWallet].forEach(el => el.className = 'msp-balance-val ok');
       } else {
-        [elAvail, elEquity, elWallet].forEach(el => { el.textContent = 'error'; el.className = 'msp-balance-val err'; });
+        setErr(data.error ? data.error.slice(0, 20) : 'error');
       }
-    } catch (_) {
-      [elAvail, elEquity, elWallet].forEach(el => { el.textContent = 'offline'; el.className = 'msp-balance-val err'; });
+    } catch (err) {
+      setErr('network err');
     }
   }
 
