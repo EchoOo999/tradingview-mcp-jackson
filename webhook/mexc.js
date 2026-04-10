@@ -50,41 +50,20 @@ async function request(method, path, body, apiKey, apiSecret) {
 }
 
 /**
- * Fetch total account balance from MEXC Spot API (GET /api/v3/account).
- * Returns { available, total } — USDT free balance and free+locked total.
- *
- * Spot API uses a different signing scheme from Futures:
- *   signature = HMAC-SHA256(secret, queryString)
- *   header: X-MEXC-APIKEY
+ * Fetch USDT balance from MEXC Futures API (/api/v1/private/account/assets).
+ * Returns:
+ *   available    — free to open new positions
+ *   equity       — available + position margin + unrealized PnL
+ *   total_wallet — cashBalance (deposited funds, excl. unrealized PnL)
  */
 export async function getBalance(apiKey, apiSecret) {
-  const SPOT_URL = 'https://api.mexc.com';
-  const timestamp = Date.now().toString();
-  const queryString = `timestamp=${timestamp}`;
-  const signature = crypto
-    .createHmac('sha256', apiSecret)
-    .update(queryString)
-    .digest('hex');
-
-  const res = await fetch(`${SPOT_URL}/api/v3/account?${queryString}&signature=${signature}`, {
-    headers: { 'X-MEXC-APIKEY': apiKey },
-  });
-
-  const data = await res.json();
-  if (!res.ok || data.code) {
-    const msg = data.msg || data.message || JSON.stringify(data);
-    throw new Error(`MEXC Spot API error: ${msg}`);
-  }
-
-  // Sum free + locked across all USDT balances
-  const usdt = (data.balances || []).find(b => b.asset === 'USDT');
-  if (!usdt) throw new Error('USDT not found in spot account balances');
-
-  const free   = parseFloat(usdt.free   || 0);
-  const locked = parseFloat(usdt.locked || 0);
+  const assets = await request('GET', '/api/v1/private/account/assets', null, apiKey, apiSecret);
+  const usdt = (assets || []).find(a => a.currency === 'USDT');
+  if (!usdt) throw new Error('USDT asset not found in futures account');
   return {
-    available: free,
-    total:     free + locked,
+    available:    parseFloat(usdt.availableBalance ?? 0),
+    equity:       parseFloat(usdt.equity           ?? 0),
+    total_wallet: parseFloat(usdt.cashBalance      ?? usdt.equity ?? 0),
   };
 }
 

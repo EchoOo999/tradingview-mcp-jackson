@@ -218,8 +218,12 @@
           <span id="msp-bal-available" class="msp-balance-val">…</span>
         </div>
         <div class="msp-balance-row">
-          <span class="msp-balance-label">Total Equity</span>
-          <span id="msp-bal-total" class="msp-balance-val">…</span>
+          <span class="msp-balance-label">Equity</span>
+          <span id="msp-bal-equity" class="msp-balance-val">…</span>
+        </div>
+        <div class="msp-balance-row">
+          <span class="msp-balance-label">Total Wallet</span>
+          <span id="msp-bal-wallet" class="msp-balance-val">…</span>
         </div>
       </div>
     </div>
@@ -288,14 +292,14 @@
     elEntry.textContent = '$' + fmt(entry);
     elEntry.className = 'msp-rr-entry-price';
 
-    if (usdRisk <= 0) {
+    if (usdRisk <= 0 || leverage <= 0) {
       [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
       return;
     }
 
     // ── MEXC native margin-based position sizing ──────────────────────────────
-    // USD Risk field = margin posted (collateral), not max loss
-    // position_size (USDT) = usd_risk × leverage
+    // USD Risk = margin posted (collateral)
+    // position_size (USDT) = margin × leverage
     // contracts            = position_size / entry
     // loss  (SL hit)       = contracts × |entry − sl|
     // profit (TP hit)      = contracts × |tp − entry|
@@ -303,7 +307,7 @@
 
     const positionSize = usdRisk * leverage;               // USDT notional
     const contracts    = positionSize / entry;             // base currency units
-    elSize.textContent = fmt(contracts, 4) + ' units';
+    elSize.textContent = fmt(positionSize, 2) + ' USDT (' + fmt(contracts, 4) + ')';
 
     if (sl > 0) {
       // Validate TP/SL direction consistency before showing numbers
@@ -432,23 +436,22 @@
   // ─── Balance Fetch ─────────────────────────────────────────────────────────
 
   async function fetchBalance() {
-    const elAvail = document.getElementById('msp-bal-available');
-    const elTotal = document.getElementById('msp-bal-total');
+    const elAvail  = document.getElementById('msp-bal-available');
+    const elEquity = document.getElementById('msp-bal-equity');
+    const elWallet = document.getElementById('msp-bal-wallet');
     try {
-      const res  = await fetch(`${WEBHOOK_URL.replace('/webhook', '/balance')}`);
+      const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'));
       const data = await res.json();
       if (data.success) {
-        elAvail.textContent = '$' + fmt(data.available);
-        elTotal.textContent = '$' + fmt(data.total);
-        elAvail.className = 'msp-balance-val ok';
-        elTotal.className = 'msp-balance-val ok';
+        elAvail.textContent  = '$' + fmt(data.available);
+        elEquity.textContent = '$' + fmt(data.equity);
+        elWallet.textContent = '$' + fmt(data.total_wallet);
+        [elAvail, elEquity, elWallet].forEach(el => el.className = 'msp-balance-val ok');
       } else {
-        elAvail.textContent = elTotal.textContent = 'error';
-        elAvail.className = elTotal.className = 'msp-balance-val err';
+        [elAvail, elEquity, elWallet].forEach(el => { el.textContent = 'error'; el.className = 'msp-balance-val err'; });
       }
     } catch (_) {
-      elAvail.textContent = elTotal.textContent = 'offline';
-      elAvail.className = elTotal.className = 'msp-balance-val err';
+      [elAvail, elEquity, elWallet].forEach(el => { el.textContent = 'offline'; el.className = 'msp-balance-val err'; });
     }
   }
 
