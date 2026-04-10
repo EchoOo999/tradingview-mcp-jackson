@@ -151,7 +151,7 @@
         <div class="msp-rr-header">
           <span>R/R PREVIEW</span>
           <input id="msp-rr-entry-px" class="msp-rr-entry-input" type="number"
-                 step="any" min="0" placeholder="entry price" title="Auto-filled from chart. Type to override." />
+                 step="any" min="0" placeholder="type entry $" title="Auto-filled from chart price. Type to override." />
         </div>
         <div class="msp-rr-grid">
           <div class="msp-rr-cell">
@@ -259,30 +259,43 @@
     const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
     const entry    = parseFloat(entryPxInput.value)                            || 0;
 
-    const blank = () => [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+    // ── Step 1: Position size — needs only margin × leverage ─────────────────
+    if (usdRisk > 0 && leverage > 0) {
+      const posSize = usdRisk * leverage;
+      elSize.textContent = '$' + fmt(posSize, 2);
+      elSize.className = 'msp-rr-val';
+    } else {
+      elSize.textContent = '—'; elSize.className = 'msp-rr-val';
+    }
 
-    if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { blank(); return; }
+    // ── Steps 2-4: need entry price ───────────────────────────────────────────
+    if (entry <= 0) {
+      [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+      return;
+    }
 
-    // ── MEXC Futures margin-based position sizing ─────────────────────────────
-    // margin (USD Risk) × leverage  = position notional (USDT)
-    // position notional / entry     = contracts (base-currency units)
-    // contracts × |entry − sl|      = max loss  at SL
-    // contracts × |tp − entry|      = profit    at TP
-    // R/R = profit / loss
+    // ── MEXC Futures margin-based sizing ──────────────────────────────────────
+    // contracts = (margin × leverage) / entry
+    // loss      = contracts × |entry − sl|    = (margin × leverage / entry) × |entry − sl|
+    // profit    = contracts × |tp − entry|
+    // R/R       = profit / loss
+    const contracts = (usdRisk * leverage) / entry;
 
-    const posSize   = usdRisk * leverage;
-    const contracts = posSize / entry;
-    elSize.textContent = fmt(posSize, 2) + ' USDT';
+    // ── Step 2: Loss (needs SL) ───────────────────────────────────────────────
+    if (sl <= 0) {
+      [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+      return;
+    }
 
-    if (sl <= 0) { [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; }); return; }
-
-    // Direction check (only if both TP and SL are set)
+    // Direction check — only warn if both TP and SL are set and inconsistent
     if (tp > 0) {
       const isLong = sl < entry;
-      if ((isLong && (tp <= entry || sl >= entry)) || (!isLong && (tp >= entry || sl <= entry))) {
+      const tpBadSide = isLong ? tp < entry : tp > entry;
+      const slBadSide = isLong ? sl > entry : sl < entry;
+      if (tpBadSide || slBadSide) {
         elLoss.textContent = elProfit.textContent = '—';
         elLoss.className = elProfit.className = 'msp-rr-val';
-        elRatio.textContent = '⚠ check TP/SL sides';
+        elRatio.textContent = '⚠ TP/SL sides wrong';
         elRatio.className   = 'msp-rr-val warn';
         return;
       }
@@ -293,18 +306,20 @@
     elLoss.textContent = '-$' + fmt(loss);
     elLoss.className   = 'msp-rr-val loss';
 
-    if (tp > 0) {
-      const tpDelta = Math.abs(tp - entry);
-      const profit  = contracts * tpDelta;
-      const ratio   = profit / loss;
-      elProfit.textContent = '+$' + fmt(profit);
-      elProfit.className   = 'msp-rr-val profit';
-      elRatio.textContent  = '1 : ' + fmt(ratio);
-      elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
-    } else {
+    // ── Step 3: Profit + R/R (needs TP) ──────────────────────────────────────
+    if (tp <= 0) {
       elProfit.textContent = '—'; elProfit.className = 'msp-rr-val';
       elRatio.textContent  = '—'; elRatio.className  = 'msp-rr-val';
+      return;
     }
+
+    const tpDelta = Math.abs(tp - entry);
+    const profit  = contracts * tpDelta;
+    const ratio   = profit / loss;
+    elProfit.textContent = '+$' + fmt(profit);
+    elProfit.className   = 'msp-rr-val profit';
+    elRatio.textContent  = '1 : ' + fmt(ratio);
+    elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
   }
 
   // Wire live updates
