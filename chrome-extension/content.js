@@ -293,57 +293,51 @@
       return;
     }
 
-    // ── Correct position sizing formula (matches server mexc.js) ──────────────
-    // sl_distance     = |entry - sl| / entry            (fraction)
-    // position_size   = usd_risk / sl_distance           (USDT notional)
-    // contracts       = position_size / entry            (base currency units)
-    //                 = usd_risk / |entry - sl|
-    // loss  (SL hit)  = contracts × |entry - sl|        = usd_risk  (always)
-    // profit (TP hit) = contracts × |tp - entry|
-    // R/R             = |tp - entry| / |entry - sl|
+    // ── MEXC native margin-based position sizing ──────────────────────────────
+    // USD Risk field = margin posted (collateral), not max loss
+    // position_size (USDT) = usd_risk × leverage
+    // contracts            = position_size / entry
+    // loss  (SL hit)       = contracts × |entry − sl|
+    // profit (TP hit)      = contracts × |tp − entry|
+    // R/R                  = profit / loss
+
+    const positionSize = usdRisk * leverage;               // USDT notional
+    const contracts    = positionSize / entry;             // base currency units
+    elSize.textContent = fmt(contracts, 4) + ' units';
 
     if (sl > 0) {
-      const slDelta = Math.abs(entry - sl);
-      const slDistPct = (slDelta / entry) * 100;
-      const positionSize = usdRisk / (slDistPct / 100);   // USDT notional
-      const contracts    = positionSize / entry;           // base units
-
-      elSize.textContent = fmt(contracts, 4) + ' units';
-      elLoss.textContent = '-$' + fmt(usdRisk);            // always equals usd_risk
-      elLoss.className = 'msp-rr-val loss';
-
-      // Validate TP/SL direction consistency
-      if (tp > 0 && sl > 0) {
+      // Validate TP/SL direction consistency before showing numbers
+      if (tp > 0) {
         const isLong = sl < entry;
         const tpWrongSide = isLong ? tp <= entry : tp >= entry;
         const slWrongSide = isLong ? sl >= entry : sl <= entry;
         if (tpWrongSide || slWrongSide) {
-          elRatio.textContent = '⚠ check prices';
-          elRatio.className = 'msp-rr-val warn';
-          elProfit.textContent = '—';
-          elProfit.className = 'msp-rr-val';
+          elProfit.textContent = '—';   elProfit.className = 'msp-rr-val';
+          elLoss.textContent   = '—';   elLoss.className   = 'msp-rr-val';
+          elRatio.textContent  = '⚠ check prices';
+          elRatio.className    = 'msp-rr-val warn';
           return;
         }
       }
 
+      const slDelta = Math.abs(entry - sl);
+      const loss    = contracts * slDelta;
+      elLoss.textContent = '-$' + fmt(loss);
+      elLoss.className   = 'msp-rr-val loss';
+
       if (tp > 0) {
-        const tpDelta  = Math.abs(tp - entry);
-        const profit   = contracts * tpDelta;
-        const ratio    = tpDelta / slDelta;
+        const tpDelta = Math.abs(tp - entry);
+        const profit  = contracts * tpDelta;
+        const ratio   = profit / loss;
         elProfit.textContent = '+$' + fmt(profit);
-        elProfit.className = 'msp-rr-val profit';
-        elRatio.textContent = '1 : ' + fmt(ratio);
-        elRatio.className = 'msp-rr-val ratio' + (ratio >= 1.5 ? ' good' : ratio < 1 ? ' bad' : '');
+        elProfit.className   = 'msp-rr-val profit';
+        elRatio.textContent  = '1 : ' + fmt(ratio);
+        elRatio.className    = 'msp-rr-val ratio' + (ratio >= 1.5 ? ' good' : ratio < 1 ? ' bad' : '');
       } else {
-        elProfit.textContent = '—';
-        elProfit.className = 'msp-rr-val';
-        elRatio.textContent = '—';
-        elRatio.className = 'msp-rr-val';
+        elProfit.textContent = '—'; elProfit.className = 'msp-rr-val';
+        elRatio.textContent  = '—'; elRatio.className  = 'msp-rr-val';
       }
     } else {
-      // No SL set — show position size from leverage only (informational)
-      const contracts = (usdRisk * (parseFloat(document.getElementById('msp-leverage').value) || 1)) / entry;
-      elSize.textContent = fmt(contracts, 4) + ' units';
       [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
     }
   }
