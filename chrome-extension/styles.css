@@ -4,9 +4,9 @@
   right: 20px;
   width: 272px;
   background: #131722;
-  border: 1px solid #2a2d3a;
+  border: 1.5px solid #f0b90b;
   border-radius: 10px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(240, 185, 11, 0.15);
   z-index: 9999999;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 13px;
