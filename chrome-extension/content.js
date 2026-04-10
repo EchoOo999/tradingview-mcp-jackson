@@ -57,33 +57,56 @@
 
   function getCurrentPrice() {
     // ── Strategy 1: Page title ─────────────────────────────────────────────────
-    // TV sets title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
-    // Take the first token before any separator; must parse to a number > 1.
+    // TV Desktop/Web sets title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
     try {
       const first = document.title.split(/[·\|\-–—]/)[0].trim();
       const n = parsePrice(first);
       if (n && n > 1) return n;
     } catch (_) {}
 
-    // ── Strategy 2: Price-axis SVG <text> elements ────────────────────────────
-    // TV renders the right-side price ruler as SVG. The current price label is
-    // among those texts. Take the maximum value — it is the top of the visible
-    // range, and the current price is always within the visible axis range.
-    // More reliable than median which can pick a mid-axis label.
+    // ── Strategy 2: Named price-axis SVG containers ────────────────────────────
     try {
-      const svgTexts = document.querySelectorAll(
-        '.price-axis text, [class*="priceAxis"] text, [class*="price-axis"] text'
-      );
+      const nodes = document.querySelectorAll([
+        '.price-axis text',
+        '[class*="priceAxis"] text',
+        '[class*="price-axis"] text',
+        '[class*="priceScale"] text',
+        '[class*="price-scale"] text',
+      ].join(', '));
       const nums = [];
-      svgTexts.forEach(el => {
-        const n = parsePrice(el.textContent);
-        // Require n > 1 to skip percentages, spreads, tiny alt-coin prices
-        if (n && n > 1) nums.push(n);
-      });
+      nodes.forEach(el => { const n = parsePrice(el.textContent); if (n > 1) nums.push(n); });
       if (nums.length >= 2) {
         nums.sort((a, b) => a - b);
-        // Current price is near the middle of the visible axis range
         return nums[Math.floor(nums.length / 2)];
+      }
+    } catch (_) {}
+
+    // ── Strategy 3: ALL SVG text elements — magnitude cluster ─────────────────
+    // The price axis always has 4-10 labels all at the same order of magnitude
+    // (e.g. 72000, 72500, 73000…). Group every SVG number by floor(log10(n))
+    // and take the median of the biggest group — that's the price axis cluster.
+    try {
+      const groups = {};
+      document.querySelectorAll('svg text').forEach(el => {
+        if (el.children.length > 0) return;
+        const n = parsePrice(el.textContent.trim());
+        if (!n || n <= 1) return;
+        const mag = Math.floor(Math.log10(n));
+        if (!groups[mag]) groups[mag] = [];
+        groups[mag].push(n);
+      });
+      const best = Object.values(groups).sort((a, b) => b.length - a.length)[0];
+      if (best && best.length >= 3) {
+        best.sort((a, b) => a - b);
+        return best[Math.floor(best.length / 2)];
+      }
+    } catch (_) {}
+
+    // ── Strategy 4: Visible DOM elements with data-price / aria attributes ─────
+    try {
+      for (const attr of ['data-price', 'data-last-price', 'data-value']) {
+        const el = document.querySelector(`[${attr}]`);
+        if (el) { const n = parsePrice(el.getAttribute(attr)); if (n > 1) return n; }
       }
     } catch (_) {}
 
