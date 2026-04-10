@@ -48,40 +48,72 @@
 
   // ─── Current Price Detection ───────────────────────────────────────────────
 
+  function parsePrice(str) {
+    if (!str) return null;
+    // Strip everything except digits, dots, commas — then remove commas
+    const n = parseFloat(str.replace(/[^0-9.,]/g, '').replace(/,/g, ''));
+    return (n > 0) ? n : null;
+  }
+
   function getCurrentPrice() {
-    // Try DOM selectors in order of reliability
-    const selectors = [
-      // Price in chart legend / header bar
-      '[class*="priceWrapper"] [class*="last"]',
-      '[class*="lastPrice"]',
-      '[class*="price-last"]',
-      // Symbol info bar (top of chart)
-      '[class*="symbolInfo"] [class*="last"]',
-      '[class*="symbol-info"] [class*="last"]',
-      // Pane legend price
-      '[class*="paneRow"] [class*="price"]',
-      '[class*="mainSeries"] [class*="price"]',
-      // Broad fallback: any element whose text looks like a price
-    ];
-
-    for (const sel of selectors) {
-      try {
-        const el = document.querySelector(sel);
-        if (el) {
-          const n = parseFloat(el.textContent.replace(/[^0-9.]/g, ''));
-          if (n > 0) return n;
-        }
-      } catch (_) {}
-    }
-
-    // Last resort: scan all elements with "price" in className for a numeric value
+    // ── Strategy 1: Page title ────────────────────────────────────────────────
+    // TradingView sets the title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
+    // The price is the leading numeric token when the tab is focused on a chart.
     try {
-      const candidates = document.querySelectorAll('[class*="price"]');
-      for (const el of candidates) {
-        if (el.children.length > 0) continue; // skip containers
-        const n = parseFloat(el.textContent.replace(/[^0-9.]/g, ''));
-        if (n > 100) return n; // price must be > 100 to avoid matching tiny values
+      const titleNum = parsePrice(document.title.split(/[·\-–|]/)[0].trim());
+      if (titleNum && titleNum > 0.0001) return titleNum;
+    } catch (_) {}
+
+    // ── Strategy 2: Price axis SVG text (current-price label on right axis) ───
+    // TradingView draws the last-price label as an SVG <text> inside .price-axis
+    // This is stable across TV updates because the SVG element role doesn't change.
+    try {
+      // The price axis is the right-side ruler; the highlighted (last-price) label
+      // is typically the first or last <text> whose value is a valid number.
+      const svgTexts = document.querySelectorAll('.price-axis text, [class*="priceAxis"] text, [class*="price-axis"] text');
+      const nums = [];
+      svgTexts.forEach(el => {
+        const n = parsePrice(el.textContent);
+        if (n && n > 0.0001) nums.push(n);
+      });
+      if (nums.length > 0) {
+        // The current price is the value closest to the median of visible axis labels
+        nums.sort((a, b) => a - b);
+        return nums[Math.floor(nums.length / 2)];
       }
+    } catch (_) {}
+
+    // ── Strategy 3: TradingView internal JS object ────────────────────────────
+    // TV exposes chart state on window — try known paths without throwing.
+    try {
+      const frames = [window, ...Array.from(document.querySelectorAll('iframe')).map(f => { try { return f.contentWindow; } catch(_){return null;} }).filter(Boolean)];
+      for (const w of frames) {
+        // tvWidget (embedded widget)
+        const price = w?.tvWidget?._chartWidgetsCollection?.[0]?.model?.mainSeries()?.lastValueData?.price;
+        if (price > 0) return price;
+      }
+    } catch (_) {}
+
+    // ── Strategy 4: Scan visible leaf text nodes for a plausible price ────────
+    // Walk all leaf elements; skip hidden ones. Pick the most-repeated numeric
+    // value that looks like a real price (>= 0.01, shown multiple times = likely
+    // the live price shown in header + axis + legend simultaneously).
+    try {
+      const tally = {};
+      document.querySelectorAll('div, span').forEach(el => {
+        if (el.children.length > 0) return;
+        if (el.offsetParent === null) return; // hidden
+        const n = parsePrice(el.textContent.trim());
+        if (!n || n < 0.01) return;
+        const key = n.toFixed(4);
+        tally[key] = (tally[key] || 0) + 1;
+      });
+      // Find the value that appears most frequently — the live price is usually
+      // rendered in 2–4 places at once (legend, axis, header).
+      const best = Object.entries(tally)
+        .filter(([, count]) => count >= 2)
+        .sort((a, b) => b[1] - a[1])[0];
+      if (best) return parseFloat(best[0]);
     } catch (_) {}
 
     return null;
