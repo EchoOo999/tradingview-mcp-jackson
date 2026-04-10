@@ -19,7 +19,7 @@
 
 import express from 'express';
 import cors from 'cors';
-import { placeOrder } from './mexc.js';
+import { placeOrder, getBalance } from './mexc.js';
 
 const app = express();
 app.use(cors());
@@ -37,6 +37,17 @@ if (!API_KEY || !API_SECRET) {
 
 // Health check
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'mexc-webhook' }));
+
+// Wallet balance
+app.get('/balance', async (req, res) => {
+  try {
+    const { available, total } = await getBalance(API_KEY, API_SECRET);
+    return res.json({ success: true, available, total });
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Balance fetch failed: ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Main webhook endpoint
 app.post('/webhook', async (req, res) => {

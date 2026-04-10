@@ -50,6 +50,21 @@ async function request(method, path, body, apiKey, apiSecret) {
 }
 
 /**
+ * Fetch USDT futures wallet balance.
+ * Returns { available, total } in USDT.
+ */
+export async function getBalance(apiKey, apiSecret) {
+  const assets = await request('GET', '/api/v1/private/account/assets', null, apiKey, apiSecret);
+  // assets is an array; find USDT
+  const usdt = (assets || []).find(a => a.currency === 'USDT');
+  if (!usdt) throw new Error('USDT asset not found in account assets');
+  return {
+    available: parseFloat(usdt.availableBalance ?? usdt.available ?? 0),
+    total:     parseFloat(usdt.equity ?? usdt.totalBalance ?? usdt.balance ?? 0),
+  };
+}
+
+/**
  * Set leverage for a symbol + side.
  */
 export async function setLeverage(symbol, leverage, openType, positionType, apiKey, apiSecret) {

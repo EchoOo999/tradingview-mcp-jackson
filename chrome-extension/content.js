@@ -210,6 +210,18 @@
       </div>
 
       <div id="msp-status" class="empty"></div>
+
+      <!-- Wallet Balance -->
+      <div id="msp-balance-box">
+        <div class="msp-balance-row">
+          <span class="msp-balance-label">Available</span>
+          <span id="msp-bal-available" class="msp-balance-val">…</span>
+        </div>
+        <div class="msp-balance-row">
+          <span class="msp-balance-label">Total Equity</span>
+          <span id="msp-bal-total" class="msp-balance-val">…</span>
+        </div>
+      </div>
     </div>
   `;
 
@@ -276,61 +288,63 @@
     elEntry.textContent = '$' + fmt(entry);
     elEntry.className = 'msp-rr-entry-price';
 
-    // Position size (base currency units)
-    const notional = usdRisk * leverage;
-    const contracts = notional / entry;
-    elSize.textContent = fmt(contracts, 4) + ' units';
-
-    if ((!tp && !sl) || leverage <= 0 || usdRisk <= 0) {
-      [elProfit, elLoss, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
+    if (usdRisk <= 0) {
+      [elProfit, elLoss, elRatio, elSize].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
       return;
     }
 
-    // Infer direction: tp > entry → long, tp < entry → short
-    // Fall back to sl if tp not set
-    let isLong;
-    if (tp > 0)      isLong = tp > entry;
-    else if (sl > 0) isLong = sl < entry;
-    else             isLong = true;
-
-    const tpDelta = tp > 0 ? Math.abs(tp - entry) : 0;
-    const slDelta = sl > 0 ? Math.abs(entry - sl)  : 0;
-
-    // Validate direction consistency
-    if (tp > 0 && sl > 0) {
-      const tpCorrect = isLong ? tp > entry : tp < entry;
-      const slCorrect = isLong ? sl < entry : sl > entry;
-      if (!tpCorrect || !slCorrect) {
-        elRatio.textContent = '⚠ check prices';
-        elRatio.className = 'msp-rr-val warn';
-      }
-    }
-
-    if (tp > 0) {
-      const profit = contracts * tpDelta;
-      elProfit.textContent = '+$' + fmt(profit);
-      elProfit.className = 'msp-rr-val profit';
-    } else {
-      elProfit.textContent = '—';
-      elProfit.className = 'msp-rr-val';
-    }
+    // ── Correct position sizing formula (matches server mexc.js) ──────────────
+    // sl_distance     = |entry - sl| / entry            (fraction)
+    // position_size   = usd_risk / sl_distance           (USDT notional)
+    // contracts       = position_size / entry            (base currency units)
+    //                 = usd_risk / |entry - sl|
+    // loss  (SL hit)  = contracts × |entry - sl|        = usd_risk  (always)
+    // profit (TP hit) = contracts × |tp - entry|
+    // R/R             = |tp - entry| / |entry - sl|
 
     if (sl > 0) {
-      const loss = contracts * slDelta;
-      elLoss.textContent = '-$' + fmt(loss);
-      elLoss.className = 'msp-rr-val loss';
-    } else {
-      elLoss.textContent = '—';
-      elLoss.className = 'msp-rr-val';
-    }
+      const slDelta = Math.abs(entry - sl);
+      const slDistPct = (slDelta / entry) * 100;
+      const positionSize = usdRisk / (slDistPct / 100);   // USDT notional
+      const contracts    = positionSize / entry;           // base units
 
-    if (tp > 0 && sl > 0 && slDelta > 0) {
-      const ratio = tpDelta / slDelta;
-      elRatio.textContent = '1 : ' + fmt(ratio);
-      elRatio.className = 'msp-rr-val ratio' + (ratio >= 1.5 ? ' good' : ratio < 1 ? ' bad' : '');
-    } else if (!(tp > 0 && sl > 0)) {
-      elRatio.textContent = '—';
-      elRatio.className = 'msp-rr-val';
+      elSize.textContent = fmt(contracts, 4) + ' units';
+      elLoss.textContent = '-$' + fmt(usdRisk);            // always equals usd_risk
+      elLoss.className = 'msp-rr-val loss';
+
+      // Validate TP/SL direction consistency
+      if (tp > 0 && sl > 0) {
+        const isLong = sl < entry;
+        const tpWrongSide = isLong ? tp <= entry : tp >= entry;
+        const slWrongSide = isLong ? sl >= entry : sl <= entry;
+        if (tpWrongSide || slWrongSide) {
+          elRatio.textContent = '⚠ check prices';
+          elRatio.className = 'msp-rr-val warn';
+          elProfit.textContent = '—';
+          elProfit.className = 'msp-rr-val';
+          return;
+        }
+      }
+
+      if (tp > 0) {
+        const tpDelta  = Math.abs(tp - entry);
+        const profit   = contracts * tpDelta;
+        const ratio    = tpDelta / slDelta;
+        elProfit.textContent = '+$' + fmt(profit);
+        elProfit.className = 'msp-rr-val profit';
+        elRatio.textContent = '1 : ' + fmt(ratio);
+        elRatio.className = 'msp-rr-val ratio' + (ratio >= 1.5 ? ' good' : ratio < 1 ? ' bad' : '');
+      } else {
+        elProfit.textContent = '—';
+        elProfit.className = 'msp-rr-val';
+        elRatio.textContent = '—';
+        elRatio.className = 'msp-rr-val';
+      }
+    } else {
+      // No SL set — show position size from leverage only (informational)
+      const contracts = (usdRisk * (parseFloat(document.getElementById('msp-leverage').value) || 1)) / entry;
+      elSize.textContent = fmt(contracts, 4) + ' units';
+      [elLoss, elProfit, elRatio].forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
     }
   }
 
@@ -420,6 +434,32 @@
       statusEl.className = 'empty';
     }, autoClear);
   }
+
+  // ─── Balance Fetch ─────────────────────────────────────────────────────────
+
+  async function fetchBalance() {
+    const elAvail = document.getElementById('msp-bal-available');
+    const elTotal = document.getElementById('msp-bal-total');
+    try {
+      const res  = await fetch(`${WEBHOOK_URL.replace('/webhook', '/balance')}`);
+      const data = await res.json();
+      if (data.success) {
+        elAvail.textContent = '$' + fmt(data.available);
+        elTotal.textContent = '$' + fmt(data.total);
+        elAvail.className = 'msp-balance-val ok';
+        elTotal.className = 'msp-balance-val ok';
+      } else {
+        elAvail.textContent = elTotal.textContent = 'error';
+        elAvail.className = elTotal.className = 'msp-balance-val err';
+      }
+    } catch (_) {
+      elAvail.textContent = elTotal.textContent = 'offline';
+      elAvail.className = elTotal.className = 'msp-balance-val err';
+    }
+  }
+
+  fetchBalance();
+  setInterval(fetchBalance, 10000);
 
   // ─── Order Execution ───────────────────────────────────────────────────────
 
