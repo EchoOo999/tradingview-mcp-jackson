@@ -1,0 +1,257 @@
+#mexc-scalp-panel {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  width: 272px;
+  background: #131722;
+  border: 1px solid #2a2d3a;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  z-index: 9999999;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  color: #d1d4dc;
+  user-select: none;
+}
+
+#mexc-scalp-panel * {
+  box-sizing: border-box;
+}
+
+/* ── Header ── */
+
+#msp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 8px;
+  background: #1e2130;
+  border-radius: 10px 10px 0 0;
+  cursor: grab;
+  border-bottom: 1px solid #2a2d3a;
+}
+
+#msp-header:active { cursor: grabbing; }
+
+#msp-title {
+  font-weight: 700;
+  font-size: 11px;
+  color: #ffffff;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+#msp-symbol-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #f0b90b;
+  background: rgba(240, 185, 11, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid rgba(240, 185, 11, 0.2);
+  transition: background 0.15s;
+}
+
+#msp-symbol-badge:hover {
+  background: rgba(240, 185, 11, 0.2);
+}
+
+#msp-minimize {
+  background: none;
+  border: none;
+  color: #787b86;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0;
+  line-height: 1;
+  width: 18px;
+  text-align: center;
+}
+
+#msp-minimize:hover { color: #d1d4dc; }
+
+/* ── Body ── */
+
+#msp-body {
+  padding: 11px 12px 12px;
+}
+
+/* ── Segmented Toggle ── */
+
+.msp-toggle-group {
+  display: flex;
+  background: #0e1119;
+  border: 1px solid #2a2d3a;
+  border-radius: 6px;
+  padding: 2px;
+  margin-bottom: 9px;
+  gap: 2px;
+}
+
+.msp-toggle-btn {
+  flex: 1;
+  padding: 5px 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #787b86;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  letter-spacing: 0.3px;
+}
+
+.msp-toggle-btn.active {
+  background: #2a2d3a;
+  color: #d1d4dc;
+}
+
+.msp-toggle-btn:hover:not(.active) {
+  color: #b2b5be;
+}
+
+/* ── Fields ── */
+
+.msp-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.msp-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.msp-field.full {
+  flex: unset;
+  width: 100%;
+}
+
+.msp-label {
+  font-size: 10px;
+  color: #787b86;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.msp-input {
+  background: #0e1119;
+  border: 1px solid #2a2d3a;
+  border-radius: 5px;
+  color: #d1d4dc;
+  font-size: 13px;
+  padding: 6px 8px;
+  width: 100%;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.msp-input:focus {
+  border-color: #3a7bd5;
+}
+
+.msp-input::placeholder {
+  color: #434651;
+}
+
+.msp-input::-webkit-inner-spin-button,
+.msp-input::-webkit-outer-spin-button {
+  opacity: 0.4;
+}
+
+/* ── Entry Price row (conditional) ── */
+
+#msp-entry-row {
+  margin-bottom: 8px;
+}
+
+#msp-entry-row.hidden {
+  display: none;
+}
+
+/* ── Divider ── */
+
+.msp-divider {
+  height: 1px;
+  background: #2a2d3a;
+  margin: 10px 0;
+}
+
+/* ── Buttons ── */
+
+#msp-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.msp-btn {
+  flex: 1;
+  padding: 11px 0;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.1s, transform 0.1s;
+  letter-spacing: 0.3px;
+}
+
+.msp-btn:hover  { opacity: 0.85; }
+.msp-btn:active { transform: scale(0.97); }
+
+.msp-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+}
+
+#msp-long-btn  { background: #089981; color: #fff; }
+#msp-short-btn { background: #f23645; color: #fff; }
+
+/* ── Status ── */
+
+#msp-status {
+  margin-top: 9px;
+  min-height: 22px;
+  font-size: 11px;
+  text-align: center;
+  padding: 4px 8px;
+  border-radius: 5px;
+  transition: all 0.2s;
+  line-height: 1.4;
+}
+
+#msp-status.success {
+  background: rgba(8, 153, 129, 0.12);
+  color: #089981;
+  border: 1px solid rgba(8, 153, 129, 0.25);
+}
+
+#msp-status.error {
+  background: rgba(242, 54, 69, 0.12);
+  color: #f23645;
+  border: 1px solid rgba(242, 54, 69, 0.25);
+}
+
+#msp-status.loading {
+  background: rgba(58, 123, 213, 0.1);
+  color: #3a7bd5;
+  border: 1px solid rgba(58, 123, 213, 0.2);
+}
+
+#msp-status.empty {
+  background: transparent;
+  border: none;
+}
+
+/* ── Collapsed ── */
+
+#mexc-scalp-panel.collapsed #msp-body { display: none; }
+#mexc-scalp-panel.collapsed { border-radius: 10px; }
