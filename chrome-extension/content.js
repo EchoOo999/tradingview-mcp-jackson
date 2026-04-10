@@ -312,6 +312,7 @@
   applyEntryMode(typeToggle.getValue());
 
   function updatePreview() {
+    console.log('[MSP] updatePreview fired');
     const elProfit = document.getElementById('msp-rr-profit');
     const elLoss   = document.getElementById('msp-rr-loss');
     const elRatio  = document.getElementById('msp-rr-ratio');
@@ -358,6 +359,7 @@
 
     // Minimum risk warning: min 1 contract → minRisk = entry × slDistPct
     const minRisk = entry * slDistPct;
+    console.log('[MSP] contracts:', contracts, '| minRisk:', minRisk, '| usdRisk:', usdRisk);
     if (contracts < 1) {
       warnEl.textContent = '⚠ Too small — Min Risk: $' + fmt(minRisk);
       warnEl.style.display = 'block';
