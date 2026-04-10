@@ -156,6 +156,20 @@
   border-color: #3a7bd5;
 }
 
+/* Entry price field — market mode: gold highlight, read-only */
+.msp-input.msp-entry-market {
+  border-color: #f0b90b;
+  background: rgba(240, 185, 11, 0.06);
+  color: #f0b90b;
+  font-weight: 600;
+  cursor: default;
+}
+
+.msp-input.msp-entry-market:focus {
+  border-color: #f0b90b;
+  outline: none;
+}
+
 .msp-input::placeholder {
   color: #434651;
 }

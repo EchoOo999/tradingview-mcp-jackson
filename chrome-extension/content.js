@@ -212,10 +212,18 @@
   const marginToggle = wireToggle('msp-margin-toggle');
   const typeToggle   = wireToggle('msp-type-toggle');
 
-  // Update entry label when order type changes
-  document.getElementById('msp-type-toggle').addEventListener('change', (e) => {
+  // Update entry field state when order type changes
+  function applyEntryMode(mode) {
+    const isMarket = mode === 'market';
+    entryInput.readOnly = isMarket;
+    entryInput.classList.toggle('msp-entry-market', isMarket);
     document.getElementById('msp-entry-label').textContent =
-      e.detail === 'limit' ? 'Entry Price (Limit)' : 'Entry Price';
+      isMarket ? 'Entry Price (live)' : 'Entry Price (Limit)';
+    if (isMarket) syncEntryPrice();
+  }
+
+  document.getElementById('msp-type-toggle').addEventListener('change', (e) => {
+    applyEntryMode(e.detail);
     updatePreview();
   });
 
@@ -227,15 +235,18 @@
 
   const entryInput = document.getElementById('msp-entry');
 
-  // Auto-populate entry from chart price only when field is empty
   function syncEntryPrice() {
-    if (entryInput.value) return;           // user has typed something — don't overwrite
+    const isMarket = typeToggle.getValue() === 'market';
+    if (!isMarket && entryInput.value) return;   // Limit + user typed → don't overwrite
     const p = getCurrentPrice();
-    if (p && p > 0) {
+    if (p && p > 0 && p !== parseFloat(entryInput.value)) {
       entryInput.value = p;
       updatePreview();
     }
   }
+
+  // Apply initial market state on load
+  applyEntryMode(typeToggle.getValue());
 
   function updatePreview() {
     const elProfit = document.getElementById('msp-rr-profit');
