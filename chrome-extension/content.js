@@ -56,13 +56,16 @@
   }
 
   function getCurrentPrice() {
+    console.log('[MSP] getCurrentPrice() called, title=', document.title);
+
     // ── Strategy 1: Page title ─────────────────────────────────────────────────
     // TV Desktop/Web sets title to: "84,250.12 · BTCUSDT.P · MEXC · TradingView"
     try {
       const first = document.title.split(/[·\|\-–—]/)[0].trim();
       const n = parsePrice(first);
-      if (n && n > 1) return n;
-    } catch (_) {}
+      console.log('[MSP] S1 title first segment:', JSON.stringify(first), '→ parsed:', n);
+      if (n && n > 1) { console.log('[MSP] S1 WIN:', n); return n; }
+    } catch (e) { console.log('[MSP] S1 error:', e.message); }
 
     // ── Strategy 2: Named price-axis SVG containers ────────────────────────────
     try {
@@ -75,11 +78,14 @@
       ].join(', '));
       const nums = [];
       nodes.forEach(el => { const n = parsePrice(el.textContent); if (n > 1) nums.push(n); });
+      console.log('[MSP] S2 price-axis nodes found:', nodes.length, 'valid nums:', nums);
       if (nums.length >= 2) {
         nums.sort((a, b) => a - b);
-        return nums[Math.floor(nums.length / 2)];
+        const result = nums[Math.floor(nums.length / 2)];
+        console.log('[MSP] S2 WIN:', result);
+        return result;
       }
-    } catch (_) {}
+    } catch (e) { console.log('[MSP] S2 error:', e.message); }
 
     // ── Strategy 3: ALL SVG text elements — magnitude cluster ─────────────────
     // The price axis always has 4-10 labels all at the same order of magnitude
@@ -95,21 +101,31 @@
         if (!groups[mag]) groups[mag] = [];
         groups[mag].push(n);
       });
+      console.log('[MSP] S3 magnitude groups:', JSON.stringify(groups));
       const best = Object.values(groups).sort((a, b) => b.length - a.length)[0];
       if (best && best.length >= 3) {
         best.sort((a, b) => a - b);
-        return best[Math.floor(best.length / 2)];
+        const result = best[Math.floor(best.length / 2)];
+        console.log('[MSP] S3 WIN:', result, 'from group size', best.length);
+        return result;
+      } else {
+        console.log('[MSP] S3 MISS: best group', best, '(need ≥3)');
       }
-    } catch (_) {}
+    } catch (e) { console.log('[MSP] S3 error:', e.message); }
 
     // ── Strategy 4: Visible DOM elements with data-price / aria attributes ─────
     try {
       for (const attr of ['data-price', 'data-last-price', 'data-value']) {
         const el = document.querySelector(`[${attr}]`);
-        if (el) { const n = parsePrice(el.getAttribute(attr)); if (n > 1) return n; }
+        if (el) {
+          const n = parsePrice(el.getAttribute(attr));
+          console.log('[MSP] S4 attr', attr, '=', el.getAttribute(attr), '→ parsed:', n);
+          if (n > 1) { console.log('[MSP] S4 WIN:', n); return n; }
+        }
       }
-    } catch (_) {}
+    } catch (e) { console.log('[MSP] S4 error:', e.message); }
 
+    console.log('[MSP] ALL STRATEGIES FAILED — returning null');
     return null;
   }
 
@@ -250,6 +266,7 @@
 
   function applyEntryMode(mode) {
     const isMarket = mode === 'market';
+    console.log('[MSP] applyEntryMode:', mode, '| isMarket:', isMarket);
     entryInput.readOnly = isMarket;
     entryInput.classList.toggle('msp-entry-market', isMarket);
     document.getElementById('msp-entry-label').textContent =
@@ -273,9 +290,11 @@
 
   function syncEntryPrice() {
     const p = getCurrentPrice();
-    if (!p || p <= 0) return;
-    if (p === parseFloat(entryInput.value)) return;   // already up to date
+    console.log('[MSP] syncEntryPrice → price:', p, '| current field:', entryInput.value, '| readOnly:', entryInput.readOnly);
+    if (!p || p <= 0) { console.log('[MSP] syncEntryPrice: no price, skipping'); return; }
+    if (p === parseFloat(entryInput.value)) { console.log('[MSP] syncEntryPrice: price unchanged, skipping'); return; }
     entryInput.value = p;
+    console.log('[MSP] syncEntryPrice: SET field to', p);
     updatePreview();
   }
 
