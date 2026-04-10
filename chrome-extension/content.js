@@ -56,21 +56,17 @@
   }
 
   function getCurrentPrice() {
-    console.log('[MSP] getCurrentPrice() called, title=', document.title);
-
     // ── Strategy 1: Page title ─────────────────────────────────────────────────
     // TV Desktop title: "BTCUSDT.P 72,890.2 ▲ +1.59% Main Layout"
     // TV Web title:     "84,250.12 · BTCUSDT.P · MEXC · TradingView"
     // Scan every whitespace/separator token — pick the first one that parses > 100
     try {
       const segments = document.title.split(/[\s·\|\-–—]+/);
-      console.log('[MSP] S1 title segments:', segments);
       for (const seg of segments) {
         const n = parsePrice(seg);
-        console.log('[MSP] S1 segment:', JSON.stringify(seg), '→ parsed:', n);
-        if (n && n > 100) { console.log('[MSP] S1 WIN:', n); return n; }
+        if (n && n > 100) return n;
       }
-    } catch (e) { console.log('[MSP] S1 error:', e.message); }
+    } catch (_) {}
 
     // ── Strategy 2: Named price-axis SVG containers ────────────────────────────
     try {
@@ -83,19 +79,13 @@
       ].join(', '));
       const nums = [];
       nodes.forEach(el => { const n = parsePrice(el.textContent); if (n > 1) nums.push(n); });
-      console.log('[MSP] S2 price-axis nodes found:', nodes.length, 'valid nums:', nums);
       if (nums.length >= 2) {
         nums.sort((a, b) => a - b);
-        const result = nums[Math.floor(nums.length / 2)];
-        console.log('[MSP] S2 WIN:', result);
-        return result;
+        return nums[Math.floor(nums.length / 2)];
       }
-    } catch (e) { console.log('[MSP] S2 error:', e.message); }
+    } catch (_) {}
 
     // ── Strategy 3: ALL SVG text elements — magnitude cluster ─────────────────
-    // The price axis always has 4-10 labels all at the same order of magnitude
-    // (e.g. 72000, 72500, 73000…). Group every SVG number by floor(log10(n))
-    // and take the median of the biggest group — that's the price axis cluster.
     try {
       const groups = {};
       document.querySelectorAll('svg text').forEach(el => {
@@ -106,31 +96,21 @@
         if (!groups[mag]) groups[mag] = [];
         groups[mag].push(n);
       });
-      console.log('[MSP] S3 magnitude groups:', JSON.stringify(groups));
       const best = Object.values(groups).sort((a, b) => b.length - a.length)[0];
       if (best && best.length >= 3) {
         best.sort((a, b) => a - b);
-        const result = best[Math.floor(best.length / 2)];
-        console.log('[MSP] S3 WIN:', result, 'from group size', best.length);
-        return result;
-      } else {
-        console.log('[MSP] S3 MISS: best group', best, '(need ≥3)');
+        return best[Math.floor(best.length / 2)];
       }
-    } catch (e) { console.log('[MSP] S3 error:', e.message); }
+    } catch (_) {}
 
-    // ── Strategy 4: Visible DOM elements with data-price / aria attributes ─────
+    // ── Strategy 4: data-price / data-last-price / data-value attributes ───────
     try {
       for (const attr of ['data-price', 'data-last-price', 'data-value']) {
         const el = document.querySelector(`[${attr}]`);
-        if (el) {
-          const n = parsePrice(el.getAttribute(attr));
-          console.log('[MSP] S4 attr', attr, '=', el.getAttribute(attr), '→ parsed:', n);
-          if (n > 1) { console.log('[MSP] S4 WIN:', n); return n; }
-        }
+        if (el) { const n = parsePrice(el.getAttribute(attr)); if (n > 1) return n; }
       }
-    } catch (e) { console.log('[MSP] S4 error:', e.message); }
+    } catch (_) {}
 
-    console.log('[MSP] ALL STRATEGIES FAILED — returning null');
     return null;
   }
 
@@ -276,7 +256,6 @@
 
   function applyEntryMode(mode) {
     const isMarket = mode === 'market';
-    console.log('[MSP] applyEntryMode:', mode, '| isMarket:', isMarket);
     entryInput.readOnly = isMarket;
     entryInput.classList.toggle('msp-entry-market', isMarket);
     document.getElementById('msp-entry-label').textContent =
@@ -300,11 +279,9 @@
 
   function syncEntryPrice() {
     const p = getCurrentPrice();
-    console.log('[MSP] syncEntryPrice → price:', p, '| current field:', entryInput.value, '| readOnly:', entryInput.readOnly);
-    if (!p || p <= 0) { console.log('[MSP] syncEntryPrice: no price, skipping'); return; }
-    if (p === parseFloat(entryInput.value)) { console.log('[MSP] syncEntryPrice: price unchanged, skipping'); return; }
+    if (!p || p <= 0) return;
+    if (p === parseFloat(entryInput.value)) return;
     entryInput.value = p;
-    console.log('[MSP] syncEntryPrice: SET field to', p);
     updatePreview();
   }
 
@@ -312,7 +289,6 @@
   applyEntryMode(typeToggle.getValue());
 
   function updatePreview() {
-    console.log('[MSP] updatePreview fired');
     const elProfit = document.getElementById('msp-rr-profit');
     const elLoss   = document.getElementById('msp-rr-loss');
     const elRatio  = document.getElementById('msp-rr-ratio');
@@ -359,7 +335,6 @@
 
     // Minimum risk warning: min 1 contract → minRisk = entry × slDistPct
     const minRisk = entry * slDistPct;
-    console.log('[MSP] contracts:', contracts, '| minRisk:', minRisk, '| usdRisk:', usdRisk);
     if (contracts < 1) {
       warnEl.textContent = '⚠ Too small — Min Risk: $' + fmt(minRisk);
       warnEl.style.display = 'block';
@@ -390,11 +365,21 @@
     elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
   }
 
-  // Wire live updates on all inputs
-  ['msp-entry', 'msp-leverage', 'msp-risk', 'msp-tp', 'msp-sl'].forEach(id =>
-    document.getElementById(id).addEventListener('input', updatePreview)
-  );
+  // Wire live updates — both 'input' (typing) and 'change' (blur/arrow keys) on every field
+  function bindPreview(id) {
+    const el = document.getElementById(id);
+    el.addEventListener('input',  updatePreview);
+    el.addEventListener('change', updatePreview);
+  }
+  bindPreview('msp-entry');
+  bindPreview('msp-leverage');
+  bindPreview('msp-risk');
+  bindPreview('msp-tp');
+  bindPreview('msp-sl');
   document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
+
+  // Fallback: re-run preview every second so any missed event still updates
+  setInterval(updatePreview, 1000);
 
   // Initial preview render (entry may already be filled from applyEntryMode above)
   setTimeout(updatePreview, 100);
