@@ -178,7 +178,10 @@
 
       <!-- R/R Preview -->
       <div id="msp-rr-box">
-        <div class="msp-rr-header"><span>R/R PREVIEW</span></div>
+        <div class="msp-rr-header">
+          <span>R/R PREVIEW</span>
+          <span id="msp-rr-dir-badge" class="msp-rr-dir-badge"></span>
+        </div>
         <div class="msp-rr-grid">
 
           <div class="msp-rr-cell">
@@ -191,17 +194,17 @@
           </div>
 
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Long PNL @ TP</span>
-            <span id="msp-rr-long-tp" class="msp-rr-val">—</span>
+            <span class="msp-rr-label">PNL @ TP</span>
+            <span id="msp-rr-pnl-tp" class="msp-rr-val">—</span>
           </div>
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Long PNL @ SL</span>
-            <span id="msp-rr-long-sl" class="msp-rr-val">—</span>
+            <span class="msp-rr-label">PNL @ SL</span>
+            <span id="msp-rr-pnl-sl" class="msp-rr-val">—</span>
           </div>
 
           <div class="msp-rr-cell msp-rr-cell-full">
-            <span class="msp-rr-label">Liq Price (Long)</span>
-            <span id="msp-rr-liq-long" class="msp-rr-val">—</span>
+            <span class="msp-rr-label">Liq Price</span>
+            <span id="msp-rr-liq" class="msp-rr-val">—</span>
           </div>
 
         </div>
@@ -209,11 +212,14 @@
 
       <div class="msp-divider"></div>
 
-      <!-- Order Buttons -->
+      <!-- Direction selectors -->
       <div id="msp-buttons">
-        <button id="msp-long-btn"  class="msp-btn">🟢 LONG</button>
-        <button id="msp-short-btn" class="msp-btn">🔴 SHORT</button>
+        <button id="msp-long-btn"  class="msp-btn msp-dir-btn">LONG</button>
+        <button id="msp-short-btn" class="msp-btn msp-dir-btn">SHORT</button>
       </div>
+
+      <!-- Push order button -->
+      <button id="msp-push-btn" class="msp-push-btn push-idle">Select direction</button>
 
       <div id="msp-status" class="empty"></div>
 
@@ -330,6 +336,10 @@
     updatePreview();
   });
 
+  // ─── Direction State ───────────────────────────────────────────────────────
+
+  let selectedDirection = null; // 'long' | 'short' | null
+
   // ─── R/R Preview ───────────────────────────────────────────────────────────
 
   function updatePreview() {
@@ -354,8 +364,8 @@
 
     const allIds = [
       'msp-rr-qty', 'msp-rr-margin',
-      'msp-rr-long-tp', 'msp-rr-long-sl',
-      'msp-rr-liq-long',
+      'msp-rr-pnl-tp', 'msp-rr-pnl-sl',
+      'msp-rr-liq',
     ];
     function resetAll() {
       allIds.forEach(id => {
@@ -370,7 +380,6 @@
       el.className   = 'msp-rr-val ' + (cls || '');
     }
     function setPnl(id, pnlUsd, margin) {
-      // % relative to margin (= Quantity / Leverage) — matches MEXC display
       const pct  = margin > 0 ? (pnlUsd / margin) * 100 : 0;
       const sign = pnlUsd >= 0 ? '+' : '-';
       const cls  = pnlUsd >= 0 ? 'profit' : 'loss';
@@ -380,7 +389,7 @@
     if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { resetAll(); return; }
 
     // MEXC native formulas:
-    // USD Risk input = Quantity (USDT notional), NOT the margin
+    // USD Risk input = Quantity (USDT notional)
     // Contracts = Quantity / Entry
     // Margin (collateral) = Quantity / Leverage
     // PNL % = PNL / Margin × 100
@@ -391,22 +400,36 @@
     setVal('msp-rr-qty',    '$' + fmt(quantity), 'qty');
     setVal('msp-rr-margin', '$' + fmt(margin));
 
-    // Liquidation price for long (0.005 = 0.5% maintenance margin)
-    const liqLong = entry * (1 - 1 / leverage + 0.005);
-    setVal('msp-rr-liq-long', '$' + fmtPrice(liqLong), 'liq');
-
-    // Long PNL @ TP
-    if (tp > 0) {
-      setPnl('msp-rr-long-tp', contracts * (tp - entry), margin);
-    } else {
-      setVal('msp-rr-long-tp', '—');
+    // PNL and Liq only shown when a direction is selected
+    if (!selectedDirection) {
+      setVal('msp-rr-pnl-tp', '—');
+      setVal('msp-rr-pnl-sl', '—');
+      setVal('msp-rr-liq', '—');
+      return;
     }
 
-    // Long PNL @ SL
-    if (sl > 0) {
-      setPnl('msp-rr-long-sl', contracts * (sl - entry), margin);
+    const isLong = selectedDirection === 'long';
+
+    // Liq price — long: entry moves down to liquidate; short: entry moves up
+    const liq = isLong
+      ? entry * (1 - 1 / leverage + 0.005)
+      : entry * (1 + 1 / leverage - 0.005);
+    setVal('msp-rr-liq', '$' + fmtPrice(liq), 'liq');
+
+    // PNL @ TP
+    if (tp > 0) {
+      const pnlTp = isLong ? contracts * (tp - entry) : contracts * (entry - tp);
+      setPnl('msp-rr-pnl-tp', pnlTp, margin);
     } else {
-      setVal('msp-rr-long-sl', '—');
+      setVal('msp-rr-pnl-tp', '—');
+    }
+
+    // PNL @ SL
+    if (sl > 0) {
+      const pnlSl = isLong ? contracts * (sl - entry) : contracts * (entry - sl);
+      setPnl('msp-rr-pnl-sl', pnlSl, margin);
+    } else {
+      setVal('msp-rr-pnl-sl', '—');
     }
   }
 
@@ -562,10 +585,8 @@
     if (tp > 0) payload.tp = tp;
     if (sl > 0) payload.sl = sl;
 
-    const longBtn  = document.getElementById('msp-long-btn');
-    const shortBtn = document.getElementById('msp-short-btn');
-    longBtn.disabled  = true;
-    shortBtn.disabled = true;
+    const pushButton = document.getElementById('msp-push-btn');
+    pushButton.disabled = true;
     setStatus('⏳ Sending…', 'loading', 0);
 
     try {
@@ -587,12 +608,55 @@
     } catch (err) {
       setStatus(`❌ Network error: ${err.message}`, 'error', 6000);
     } finally {
-      longBtn.disabled  = false;
-      shortBtn.disabled = false;
+      pushButton.disabled = false;
     }
   }
 
-  document.getElementById('msp-long-btn') .addEventListener('click', () => sendOrder('open_long'));
-  document.getElementById('msp-short-btn').addEventListener('click', () => sendOrder('open_short'));
+  // ─── Direction Selection ────────────────────────────────────────────────────
+
+  const longBtn  = document.getElementById('msp-long-btn');
+  const shortBtn = document.getElementById('msp-short-btn');
+  const pushBtn  = document.getElementById('msp-push-btn');
+
+  function setDirection(dir) {
+    // Toggle off if same direction clicked again
+    selectedDirection = (selectedDirection === dir) ? null : dir;
+
+    longBtn.classList.toggle('dir-long-active',   selectedDirection === 'long');
+    longBtn.classList.toggle('dir-inactive',       selectedDirection === 'short');
+    shortBtn.classList.toggle('dir-short-active',  selectedDirection === 'short');
+    shortBtn.classList.toggle('dir-inactive',       selectedDirection === 'long');
+
+    const badge = document.getElementById('msp-rr-dir-badge');
+    if (selectedDirection === 'long') {
+      pushBtn.textContent = 'PUSH LONG';
+      pushBtn.className   = 'msp-push-btn push-long';
+      badge.textContent   = 'LONG';
+      badge.className     = 'msp-rr-dir-badge badge-long';
+    } else if (selectedDirection === 'short') {
+      pushBtn.textContent = 'PUSH SHORT';
+      pushBtn.className   = 'msp-push-btn push-short';
+      badge.textContent   = 'SHORT';
+      badge.className     = 'msp-rr-dir-badge badge-short';
+    } else {
+      pushBtn.textContent = 'Select direction';
+      pushBtn.className   = 'msp-push-btn push-idle';
+      badge.textContent   = '';
+      badge.className     = 'msp-rr-dir-badge';
+    }
+
+    updatePreview();
+  }
+
+  longBtn .addEventListener('click', () => setDirection('long'));
+  shortBtn.addEventListener('click', () => setDirection('short'));
+
+  pushBtn.addEventListener('click', () => {
+    if (!selectedDirection) {
+      setStatus('❌ Select LONG or SHORT first', 'error');
+      return;
+    }
+    sendOrder(selectedDirection === 'long' ? 'open_long' : 'open_short');
+  });
 
 })();

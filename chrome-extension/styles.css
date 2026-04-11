@@ -260,6 +260,26 @@
   text-transform: uppercase;
 }
 
+.msp-rr-dir-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+}
+
+.msp-rr-dir-badge.badge-long {
+  background: rgba(8, 153, 129, 0.15);
+  color: #089981;
+  border: 1px solid rgba(8, 153, 129, 0.3);
+}
+
+.msp-rr-dir-badge.badge-short {
+  background: rgba(242, 54, 69, 0.15);
+  color: #f23645;
+  border: 1px solid rgba(242, 54, 69, 0.3);
+}
+
 .msp-rr-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -332,8 +352,63 @@
   transform: none;
 }
 
-#msp-long-btn  { background: #089981; color: #fff; }
-#msp-short-btn { background: #f23645; color: #fff; }
+/* Direction selector buttons — dim by default, light up when selected */
+.msp-dir-btn {
+  background: #1e2130;
+  color: #4a4e5c;
+  border: 1.5px solid #2a2d3a;
+}
+
+#msp-long-btn.dir-long-active {
+  background: #089981;
+  color: #fff;
+  border-color: #089981;
+}
+
+#msp-short-btn.dir-short-active {
+  background: #f23645;
+  color: #fff;
+  border-color: #f23645;
+}
+
+.msp-dir-btn.dir-inactive {
+  opacity: 0.35;
+}
+
+/* ── Push Button ── */
+
+.msp-push-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px 0;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  transition: opacity 0.1s, transform 0.1s;
+}
+
+.msp-push-btn:hover  { opacity: 0.85; }
+.msp-push-btn:active { transform: scale(0.98); }
+.msp-push-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+.msp-push-btn.push-idle {
+  background: #2a2d3a;
+  color: #4a4e5c;
+  cursor: default;
+}
+
+.msp-push-btn.push-long {
+  background: #089981;
+  color: #fff;
+}
+
+.msp-push-btn.push-short {
+  background: #f23645;
+  color: #fff;
+}
 
 /* ── Status ── */
 
