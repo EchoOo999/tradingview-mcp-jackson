@@ -309,12 +309,9 @@
   let lastBalance = 0;
 
   function applyRiskPct() {
-    if (!lastBalance) return;
-    const pct     = parseInt(document.getElementById('msp-risk-slider').value, 10);
-    const computed = (pct / 100) * lastBalance;
-    document.getElementById('msp-risk').value          = computed.toFixed(2);
+    const pct = parseInt(document.getElementById('msp-risk-slider').value, 10);
     document.getElementById('msp-risk-pct-label').textContent = pct + '%';
-    updatePreview();
+    updatePreview(); // updatePreview computes the USDT value and updates the display
   }
 
   document.getElementById('msp-risk-slider').addEventListener('input', applyRiskPct);
@@ -334,10 +331,22 @@
 
   function updatePreview() {
     const leverage = parseFloat(document.getElementById('msp-leverage').value) || 0;
-    const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
     const tp       = parseFloat(document.getElementById('msp-tp').value)       || 0;
     const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
     const entry    = parseFloat(entryInput.value)                              || 0;
+
+    // Resolve usdRisk from the active mode — pct mode computes directly from
+    // slider + balance so the input field is never a stale intermediate.
+    let usdRisk;
+    const riskInput = document.getElementById('msp-risk');
+    if (riskToggle.getValue() === 'pct' && lastBalance > 0) {
+      const pct = parseInt(document.getElementById('msp-risk-slider').value, 10);
+      usdRisk = (pct / 100) * lastBalance;
+      // Keep the input showing the equivalent USDT amount
+      riskInput.value = usdRisk.toFixed(2);
+    } else {
+      usdRisk = parseFloat(riskInput.value) || 0;
+    }
 
     const allIds = [
       'msp-rr-qty', 'msp-rr-margin',
