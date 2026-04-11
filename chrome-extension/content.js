@@ -394,13 +394,13 @@
     if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { resetAll(); return; }
 
     // MEXC native formulas:
-    // USD Risk input = Margin (collateral posted)
-    // Position Size (notional) = Margin × Leverage
-    // Contracts = Position Size / Entry
+    // USD Risk = Quantity (USDT notional position size)
+    // Contracts = USD Risk / Entry
+    // Margin = USD Risk / Leverage (display only)
     // PNL % = PNL / Margin × 100
-    const margin    = usdRisk;
-    const quantity  = usdRisk * leverage;
-    const contracts = quantity / entry;
+    const quantity  = usdRisk;
+    const contracts = usdRisk / entry;
+    const margin    = usdRisk / leverage;
 
     const coin    = getBaseCoin();
     const coinAmt = fmt(contracts, 4) + (coin ? ' ' + coin : '');
