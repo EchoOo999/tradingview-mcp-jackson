@@ -2,7 +2,7 @@
   position: fixed;
   top: 80px;
   right: 20px;
-  width: 272px;
+  width: 280px;
   background: #131722;
   border: 1.5px solid #f0b90b;
   border-radius: 10px;
@@ -89,6 +89,10 @@
   gap: 2px;
 }
 
+.msp-toggle-sm {
+  margin-bottom: 6px;
+}
+
 .msp-toggle-btn {
   flex: 1;
   padding: 5px 0;
@@ -156,7 +160,6 @@
   border-color: #3a7bd5;
 }
 
-/* Entry price field — market mode: read-only, subtle distinction */
 .msp-input.msp-entry-market {
   cursor: default;
   color: #d1d4dc;
@@ -171,7 +174,7 @@
   opacity: 0.4;
 }
 
-/* ── Entry Price row (conditional) ── */
+/* ── Entry Price row ── */
 
 #msp-entry-row {
   margin-bottom: 8px;
@@ -179,6 +182,60 @@
 
 #msp-entry-row.hidden {
   display: none;
+}
+
+/* ── Risk Mode Wrap ── */
+
+#msp-risk-mode-wrap {
+  margin-bottom: 8px;
+}
+
+/* ── % of Balance Slider ── */
+
+.msp-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 4px;
+}
+
+.msp-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: #2a2d3a;
+  outline: none;
+  cursor: pointer;
+}
+
+.msp-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f0b90b;
+  cursor: pointer;
+  border: 2px solid #131722;
+}
+
+.msp-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f0b90b;
+  cursor: pointer;
+  border: 2px solid #131722;
+}
+
+.msp-pct-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #f0b90b;
+  min-width: 32px;
+  text-align: right;
 }
 
 /* ── R/R Preview Box ── */
@@ -203,11 +260,10 @@
   text-transform: uppercase;
 }
 
-
 .msp-rr-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 8px;
+  gap: 7px 8px;
 }
 
 .msp-rr-cell {
@@ -225,31 +281,15 @@
 }
 
 .msp-rr-val {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   color: #787b86;
 }
 
+.msp-rr-val.qty    { color: #d1d4dc; font-size: 12px; }
 .msp-rr-val.profit { color: #089981; }
 .msp-rr-val.loss   { color: #f23645; }
-
-.msp-rr-val.ratio      { color: #d1d4dc; }
-.msp-rr-val.ratio.good { color: #089981; }
-.msp-rr-val.ratio.bad  { color: #f23645; }
-.msp-rr-val.warn       { color: #f0b90b; font-size: 10px; }
-
-.msp-min-warn {
-  font-size: 10px;
-  font-weight: 700;
-  color: #f0b90b;
-  background: rgba(240, 185, 11, 0.08);
-  border: 1px solid rgba(240, 185, 11, 0.25);
-  border-radius: 4px;
-  padding: 4px 8px;
-  margin-bottom: 7px;
-  text-align: center;
-  letter-spacing: 0.2px;
-}
+.msp-rr-val.liq    { color: #f0b90b; }
 
 /* ── Divider ── */
 

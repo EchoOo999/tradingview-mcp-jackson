@@ -50,16 +50,11 @@
 
   function parsePrice(str) {
     if (!str) return null;
-    // Strip everything except digits, dots, commas — then remove commas
     const n = parseFloat(str.replace(/[^0-9.,]/g, '').replace(/,/g, ''));
     return (n > 0) ? n : null;
   }
 
   function getCurrentPrice() {
-    // ── Strategy 1: Page title ─────────────────────────────────────────────────
-    // TV Desktop title: "BTCUSDT.P 72,890.2 ▲ +1.59% Main Layout"
-    // TV Web title:     "84,250.12 · BTCUSDT.P · MEXC · TradingView"
-    // Scan every whitespace/separator token — pick the first one that parses > 100
     try {
       const segments = document.title.split(/[\s·\|\-–—]+/);
       for (const seg of segments) {
@@ -68,7 +63,6 @@
       }
     } catch (_) {}
 
-    // ── Strategy 2: Named price-axis SVG containers ────────────────────────────
     try {
       const nodes = document.querySelectorAll([
         '.price-axis text',
@@ -85,7 +79,6 @@
       }
     } catch (_) {}
 
-    // ── Strategy 3: ALL SVG text elements — magnitude cluster ─────────────────
     try {
       const groups = {};
       document.querySelectorAll('svg text').forEach(el => {
@@ -103,7 +96,6 @@
       }
     } catch (_) {}
 
-    // ── Strategy 4: data-price / data-last-price / data-value attributes ───────
     try {
       for (const attr of ['data-price', 'data-last-price', 'data-value']) {
         const el = document.querySelector(`[${attr}]`);
@@ -153,8 +145,22 @@
           <input id="msp-leverage" class="msp-input" type="number" value="10" min="1" max="200" step="1" />
         </div>
         <div class="msp-field">
-          <span class="msp-label">USD Risk</span>
-          <input id="msp-risk" class="msp-input" type="number" value="50" min="1" step="1" />
+          <span class="msp-label">USD Risk (Margin)</span>
+          <input id="msp-risk" class="msp-input" type="number" value="50" min="0.01" step="0.01" />
+        </div>
+      </div>
+
+      <!-- Risk Mode Toggle -->
+      <div id="msp-risk-mode-wrap">
+        <div class="msp-toggle-group msp-toggle-sm" id="msp-risk-toggle">
+          <button class="msp-toggle-btn active" data-value="manual">Manual $</button>
+          <button class="msp-toggle-btn" data-value="pct">% of Balance</button>
+        </div>
+        <div id="msp-risk-pct-row" style="display:none">
+          <div class="msp-slider-row">
+            <input id="msp-risk-slider" class="msp-slider" type="range" min="1" max="100" value="10" />
+            <span id="msp-risk-pct-label" class="msp-pct-label">10%</span>
+          </div>
         </div>
       </div>
 
@@ -172,26 +178,45 @@
 
       <!-- R/R Preview -->
       <div id="msp-rr-box">
-        <div class="msp-rr-header">
-          <span>R/R PREVIEW</span>
-        </div>
+        <div class="msp-rr-header"><span>R/R PREVIEW</span></div>
         <div class="msp-rr-grid">
+
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Profit (TP)</span>
-            <span id="msp-rr-profit" class="msp-rr-val profit">—</span>
+            <span class="msp-rr-label">Quantity (USDT)</span>
+            <span id="msp-rr-qty" class="msp-rr-val">—</span>
           </div>
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Loss (SL)</span>
-            <span id="msp-rr-loss" class="msp-rr-val loss">—</span>
+            <span class="msp-rr-label">Margin</span>
+            <span id="msp-rr-margin" class="msp-rr-val">—</span>
+          </div>
+
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Long PNL @ TP</span>
+            <span id="msp-rr-long-tp" class="msp-rr-val">—</span>
           </div>
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">R/R Ratio</span>
-            <span id="msp-rr-ratio" class="msp-rr-val ratio">—</span>
+            <span class="msp-rr-label">Short PNL @ TP</span>
+            <span id="msp-rr-short-tp" class="msp-rr-val">—</span>
+          </div>
+
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Long PNL @ SL</span>
+            <span id="msp-rr-long-sl" class="msp-rr-val">—</span>
           </div>
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Position Size</span>
-            <span id="msp-rr-size" class="msp-rr-val">—</span>
+            <span class="msp-rr-label">Short PNL @ SL</span>
+            <span id="msp-rr-short-sl" class="msp-rr-val">—</span>
           </div>
+
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Liq Long</span>
+            <span id="msp-rr-liq-long" class="msp-rr-val">—</span>
+          </div>
+          <div class="msp-rr-cell">
+            <span class="msp-rr-label">Liq Short</span>
+            <span id="msp-rr-liq-short" class="msp-rr-val">—</span>
+          </div>
+
         </div>
       </div>
 
@@ -235,13 +260,15 @@
 
   const marginToggle = wireToggle('msp-margin-toggle');
   const typeToggle   = wireToggle('msp-type-toggle');
+  const riskToggle   = wireToggle('msp-risk-toggle');
 
-  // Managed interval for Market-mode auto-fill
+  // ─── Market / Limit entry price ────────────────────────────────────────────
+
   let marketInterval = null;
 
   function startMarketFill() {
     stopMarketFill();
-    syncEntryPrice();                              // immediate fill on switch
+    syncEntryPrice();
     marketInterval = setInterval(syncEntryPrice, 2000);
   }
 
@@ -264,11 +291,19 @@
     updatePreview();
   });
 
-  // ─── R/R Preview ───────────────────────────────────────────────────────────
+  // ─── Formatters ────────────────────────────────────────────────────────────
 
   function fmt(n, decimals = 2) {
     return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   }
+
+  function fmtPrice(p) {
+    if (p >= 100)  return fmt(p, 2);
+    if (p >= 1)    return fmt(p, 4);
+    return fmt(p, 6);
+  }
+
+  // ─── Entry Input ref ───────────────────────────────────────────────────────
 
   const entryInput = document.getElementById('msp-entry');
 
@@ -280,65 +315,104 @@
     updatePreview();
   }
 
-  // Apply initial market state on load (starts interval if default is Market)
   applyEntryMode(typeToggle.getValue());
 
-  function updatePreview() {
-    const elProfit = document.getElementById('msp-rr-profit');
-    const elLoss   = document.getElementById('msp-rr-loss');
-    const elRatio  = document.getElementById('msp-rr-ratio');
-    const elSize   = document.getElementById('msp-rr-size');
+  // ─── % of Balance Risk Mode ────────────────────────────────────────────────
 
+  let lastBalance = 0;
+
+  function applyRiskPct() {
+    if (!lastBalance) return;
+    const pct     = parseInt(document.getElementById('msp-risk-slider').value, 10);
+    const computed = (pct / 100) * lastBalance;
+    document.getElementById('msp-risk').value          = computed.toFixed(2);
+    document.getElementById('msp-risk-pct-label').textContent = pct + '%';
+    updatePreview();
+  }
+
+  document.getElementById('msp-risk-slider').addEventListener('input', applyRiskPct);
+
+  document.getElementById('msp-risk-toggle').addEventListener('change', (e) => {
+    const isPct      = e.detail === 'pct';
+    const riskInput  = document.getElementById('msp-risk');
+    const pctRow     = document.getElementById('msp-risk-pct-row');
+    riskInput.readOnly = isPct;
+    riskInput.classList.toggle('msp-entry-market', isPct);
+    pctRow.style.display = isPct ? 'block' : 'none';
+    if (isPct) applyRiskPct();
+    updatePreview();
+  });
+
+  // ─── R/R Preview ───────────────────────────────────────────────────────────
+
+  function updatePreview() {
     const leverage = parseFloat(document.getElementById('msp-leverage').value) || 0;
     const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
     const tp       = parseFloat(document.getElementById('msp-tp').value)       || 0;
     const sl       = parseFloat(document.getElementById('msp-sl').value)       || 0;
     const entry    = parseFloat(entryInput.value)                              || 0;
 
-    const reset = (...els) => els.forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
-
-    if (entry <= 0 || usdRisk <= 0 || leverage <= 0) {
-      reset(elLoss, elProfit, elRatio, elSize);
-      return;
+    const allIds = [
+      'msp-rr-qty','msp-rr-margin',
+      'msp-rr-long-tp','msp-rr-short-tp',
+      'msp-rr-long-sl','msp-rr-short-sl',
+      'msp-rr-liq-long','msp-rr-liq-short',
+    ];
+    function resetAll() {
+      allIds.forEach(id => {
+        const el = document.getElementById(id);
+        el.textContent = '—';
+        el.className   = 'msp-rr-val';
+      });
+    }
+    function setVal(id, text, cls) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className   = 'msp-rr-val ' + (cls || '');
+    }
+    function setPnl(id, pnlUsd) {
+      const pct  = usdRisk > 0 ? (pnlUsd / usdRisk) * 100 : 0;
+      const sign = pnlUsd >= 0 ? '+' : '-';
+      const cls  = pnlUsd >= 0 ? 'profit' : 'loss';
+      setVal(id, `${sign}$${fmt(Math.abs(pnlUsd))} (${sign}${fmt(Math.abs(pct))}%)`, cls);
     }
 
-    // MEXC-native formulas:
-    // USD Risk = Margin (collateral posted)
-    // Position Size (notional) = USD Risk × Leverage
-    // Contracts = Position Size / Entry Price
-    const positionSize = usdRisk * leverage;
-    const contracts    = positionSize / entry;
+    if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { resetAll(); return; }
 
-    elSize.textContent = '$' + fmt(positionSize);
-    elSize.className   = 'msp-rr-val';
+    // Core — MEXC native formulas
+    const positionSize = usdRisk * leverage;   // Quantity (USDT notional)
+    const contracts    = positionSize / entry;  // contracts
+    const margin       = usdRisk;              // Margin = collateral posted
 
-    if (sl > 0) {
-      const loss = contracts * Math.abs(entry - sl);
-      elLoss.textContent = '-$' + fmt(loss);
-      elLoss.className   = 'msp-rr-val loss';
+    setVal('msp-rr-qty',    '$' + fmt(positionSize), 'qty');
+    setVal('msp-rr-margin', '$' + fmt(margin));
 
-      if (tp > 0) {
-        const profit = contracts * Math.abs(tp - entry);
-        const ratio  = profit / loss;
-        elProfit.textContent = '+$' + fmt(profit);
-        elProfit.className   = 'msp-rr-val profit';
-        elRatio.textContent  = '1 : ' + fmt(ratio);
-        elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
-      } else {
-        reset(elProfit, elRatio);
-      }
+    // Liquidation prices (0.005 = 0.5% maintenance margin)
+    const liqLong  = entry * (1 - 1 / leverage + 0.005);
+    const liqShort = entry * (1 + 1 / leverage - 0.005);
+    setVal('msp-rr-liq-long',  '$' + fmtPrice(liqLong),  'liq');
+    setVal('msp-rr-liq-short', '$' + fmtPrice(liqShort), 'liq');
+
+    // TP PNL
+    if (tp > 0) {
+      setPnl('msp-rr-long-tp',   contracts * (tp - entry));   // long wins if TP > entry
+      setPnl('msp-rr-short-tp',  contracts * (entry - tp));   // short wins if TP < entry
     } else {
-      reset(elLoss, elProfit, elRatio);
+      setVal('msp-rr-long-tp',  '—');
+      setVal('msp-rr-short-tp', '—');
+    }
 
-      if (tp > 0) {
-        const profit = contracts * Math.abs(tp - entry);
-        elProfit.textContent = '+$' + fmt(profit);
-        elProfit.className   = 'msp-rr-val profit';
-      }
+    // SL PNL
+    if (sl > 0) {
+      setPnl('msp-rr-long-sl',  contracts * (sl - entry));   // long loses if SL < entry
+      setPnl('msp-rr-short-sl', contracts * (entry - sl));   // short loses if SL > entry
+    } else {
+      setVal('msp-rr-long-sl',  '—');
+      setVal('msp-rr-short-sl', '—');
     }
   }
 
-  // Wire live updates — both 'input' (typing) and 'change' (blur/arrow keys) on every field
+  // Wire live updates
   function bindPreview(id) {
     const el = document.getElementById(id);
     el.addEventListener('input',  updatePreview);
@@ -351,10 +425,8 @@
   bindPreview('msp-sl');
   document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
 
-  // Fallback: re-run preview every second so any missed event still updates
+  // Fallback: re-run every second so any missed event still updates
   setInterval(updatePreview, 1000);
-
-  // Initial preview render (entry may already be filled from applyEntryMode above)
   setTimeout(updatePreview, 100);
 
   // ─── Symbol Badge ──────────────────────────────────────────────────────────
@@ -373,7 +445,6 @@
   refreshSymbol();
   badge.addEventListener('click', refreshSymbol);
 
-  // Auto-refresh on URL change (TV updates URL on symbol switch)
   let lastHref = location.href;
   setInterval(() => {
     if (location.href !== lastHref) {
@@ -382,7 +453,6 @@
     }
   }, 500);
 
-  // Watch title changes
   const titleEl = document.querySelector('title');
   if (titleEl) new MutationObserver(refreshSymbol).observe(titleEl, { childList: true });
 
@@ -442,8 +512,10 @@
       let data;
       try { data = JSON.parse(text); } catch (_) { el.textContent = 'bad response'; el.className = 'msp-balance-val err'; return; }
       if (data.success) {
+        lastBalance = data.total;
         el.textContent = '$' + fmt(data.total);
         el.className = 'msp-balance-val ok';
+        if (riskToggle.getValue() === 'pct') applyRiskPct();
       } else {
         el.textContent = data.error ? data.error.slice(0, 24) : 'api error';
         el.className = 'msp-balance-val err';
