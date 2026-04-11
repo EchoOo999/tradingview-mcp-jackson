@@ -24,9 +24,11 @@ async function getVolumeDecimals(symbol) {
       // Try known field names in priority order
       const raw = data.data.volDecimalPlace ?? data.data.volumeDecimal ?? data.data.contractSize ?? data.data.minVol;
       if (raw !== undefined) {
-        const dec = Number(raw);
+        const num = Number(raw);
+        // If value < 1 it's a minVol (e.g. 0.0001) — convert to decimal count
+        const dec = num < 1 ? Math.round(-Math.log10(num)) : num;
         volumeDecimalCache[symbol] = dec;
-        console.log(`[contract detail] ${symbol} using precision=${dec}`);
+        console.log(`[contract detail] ${symbol} raw=${num} → decimals=${dec}`);
         return dec;
       }
       console.warn(`[contract detail] No precision field found for ${symbol}`);
