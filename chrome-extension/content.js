@@ -46,6 +46,12 @@
     return s;
   }
 
+  function getBaseCoin() {
+    const mexc = toMexcSymbol(getRawSymbol());
+    if (!mexc) return '';
+    return mexc.split('_')[0] || '';
+  }
+
   // ─── Current Price Detection ───────────────────────────────────────────────
 
   function parsePrice(str) {
@@ -184,8 +190,8 @@
         </div>
         <div class="msp-rr-grid">
 
-          <div class="msp-rr-cell">
-            <span class="msp-rr-label">Quantity (USDT)</span>
+          <div class="msp-rr-cell msp-rr-cell-full">
+            <span class="msp-rr-label">Position Size</span>
             <span id="msp-rr-qty" class="msp-rr-val">—</span>
           </div>
           <div class="msp-rr-cell">
@@ -397,7 +403,9 @@
     const contracts = quantity / entry;
     const margin    = quantity / leverage;
 
-    setVal('msp-rr-qty',    '$' + fmt(quantity), 'qty');
+    const coin    = getBaseCoin();
+    const coinAmt = fmt(contracts, 4) + (coin ? ' ' + coin : '');
+    setVal('msp-rr-qty', '$' + fmt(quantity) + ' / ' + coinAmt, 'qty');
     setVal('msp-rr-margin', '$' + fmt(margin));
 
     // PNL and Liq only shown when a direction is selected
