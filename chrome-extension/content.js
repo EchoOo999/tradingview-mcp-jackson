@@ -597,9 +597,14 @@
     const savedClass = pushButton.className;
 
     function restorePush() {
-      pushButton.disabled  = false;
+      pushButton.disabled    = false;
       pushButton.textContent = savedText;
       pushButton.className   = savedClass;
+      // Re-apply direction button visual state — never let push restore reset it
+      longBtn.classList.toggle('dir-long-active',  selectedDirection === 'long');
+      longBtn.classList.toggle('dir-inactive',      selectedDirection === 'short');
+      shortBtn.classList.toggle('dir-short-active', selectedDirection === 'short');
+      shortBtn.classList.toggle('dir-inactive',     selectedDirection === 'long');
     }
 
     pushButton.disabled    = true;

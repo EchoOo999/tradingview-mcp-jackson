@@ -6,19 +6,35 @@ import crypto from 'crypto';
 
 const BASE_URL = 'https://contract.mexc.com';
 
-// Minimum contract step per base coin (MEXC precision specs)
-const CONTRACT_DECIMALS = {
-  BTC: 4,
-  ETH: 3,
-  SOL: 1,
-};
-const DEFAULT_DECIMALS = 4;
+// Fallback precision per base coin if contract detail fetch fails
+const FALLBACK_DECIMALS = { BTC: 4, ETH: 3, SOL: 1 };
+const DEFAULT_DECIMALS  = 4;
 
-function roundVolume(rawVolume, symbol) {
-  const base     = symbol.split('_')[0].toUpperCase();
-  const decimals = CONTRACT_DECIMALS[base] ?? DEFAULT_DECIMALS;
-  const factor   = Math.pow(10, decimals);
-  return Math.floor(rawVolume * factor) / factor;
+// Cache volumeDecimal per symbol (fetched once from MEXC contract detail)
+const volumeDecimalCache = {};
+
+async function getVolumeDecimals(symbol) {
+  if (volumeDecimalCache[symbol] !== undefined) return volumeDecimalCache[symbol];
+
+  try {
+    const res  = await fetch(`${BASE_URL}/api/v1/contract/detail?symbol=${symbol}`);
+    const data = await res.json();
+    if ((data.code === 0 || data.code === 200) && data.data?.volumeDecimal !== undefined) {
+      const dec = Number(data.data.volumeDecimal);
+      volumeDecimalCache[symbol] = dec;
+      console.log(`[contract detail] ${symbol} volumeDecimal=${dec} (minVol=${data.data.minVol})`);
+      return dec;
+    }
+    console.warn(`[contract detail] Unexpected response for ${symbol}:`, JSON.stringify(data).slice(0, 200));
+  } catch (e) {
+    console.warn(`[contract detail] Fetch failed for ${symbol}: ${e.message}`);
+  }
+
+  const base = symbol.split('_')[0].toUpperCase();
+  const dec  = FALLBACK_DECIMALS[base] ?? DEFAULT_DECIMALS;
+  console.warn(`[contract detail] Using fallback decimals=${dec} for ${symbol}`);
+  volumeDecimalCache[symbol] = dec;
+  return dec;
 }
 
 // MEXC side codes
@@ -196,11 +212,13 @@ export async function placeOrder(params) {
   }
 
   // usd_risk = full USDT quantity (position notional) — NOT margin, NOT max loss
-  // volume (contracts) = usd_risk / current_price, rounded down to coin precision
+  // volume (contracts) = usd_risk / current_price, rounded DOWN to MEXC volumeDecimal
+  const decimals  = await getVolumeDecimals(symbol);
+  const factor    = Math.pow(10, decimals);
   const rawVolume = usd_risk / contractPrice;
-  const volume    = roundVolume(rawVolume, symbol);
-  console.log(`[${new Date().toISOString()}] Volume calc: usd_risk=${usd_risk} / price=${contractPrice} = ${rawVolume} → rounded ${volume} contracts`);
-  if (volume <= 0) throw new Error(`Computed volume rounds to zero. Increase usd_risk (min ~${contractPrice * Math.pow(10, -(CONTRACT_DECIMALS[symbol.split('_')[0]] ?? DEFAULT_DECIMALS))} USDT).`);
+  const volume    = Math.floor(rawVolume * factor) / factor;
+  console.log(`[${new Date().toISOString()}] Volume calc: ${usd_risk} / ${contractPrice} = ${rawVolume} → floor(${decimals}dp) = ${volume}`);
+  if (volume <= 0) throw new Error(`Volume rounds to zero at ${decimals}dp. Min usd_risk ≈ $${(contractPrice / factor).toFixed(2)}.`);
 
   // Place the market/limit order
   const orderBody = {
@@ -213,6 +231,7 @@ export async function placeOrder(params) {
     openType,
   };
 
+  console.log(`[${new Date().toISOString()}] Submitting order: ${JSON.stringify(orderBody)}`);
   const orderId = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
 
   // Attach TP/SL via stoporder/place (shows in "TP/SL Order" tab, auto-cancels with position)
