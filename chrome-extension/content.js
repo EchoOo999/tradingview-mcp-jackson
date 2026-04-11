@@ -175,7 +175,6 @@
         <div class="msp-rr-header">
           <span>R/R PREVIEW</span>
         </div>
-        <div id="msp-min-warn" class="msp-min-warn" style="display:none"></div>
         <div class="msp-rr-grid">
           <div class="msp-rr-cell">
             <span class="msp-rr-label">Profit (TP)</span>
@@ -192,10 +191,6 @@
           <div class="msp-rr-cell">
             <span class="msp-rr-label">Position Size</span>
             <span id="msp-rr-size" class="msp-rr-val">—</span>
-          </div>
-          <div class="msp-rr-cell">
-            <span class="msp-rr-label">Margin Required</span>
-            <span id="msp-rr-margin" class="msp-rr-val">—</span>
           </div>
         </div>
       </div>
@@ -293,7 +288,6 @@
     const elLoss   = document.getElementById('msp-rr-loss');
     const elRatio  = document.getElementById('msp-rr-ratio');
     const elSize   = document.getElementById('msp-rr-size');
-    const elMargin = document.getElementById('msp-rr-margin');
 
     const leverage = parseFloat(document.getElementById('msp-leverage').value) || 0;
     const usdRisk  = parseFloat(document.getElementById('msp-risk').value)     || 0;
@@ -302,55 +296,46 @@
     const entry    = parseFloat(entryInput.value)                              || 0;
 
     const reset = (...els) => els.forEach(el => { el.textContent = '—'; el.className = 'msp-rr-val'; });
-    const warnEl = document.getElementById('msp-min-warn');
 
-    // USD Risk = max loss — always fixed
-    // Need entry + SL to compute position size
-    if (entry <= 0 || sl <= 0 || usdRisk <= 0) {
-      reset(elLoss, elProfit, elRatio, elSize, elMargin);
-      warnEl.style.display = 'none';
+    if (entry <= 0 || usdRisk <= 0 || leverage <= 0) {
+      reset(elLoss, elProfit, elRatio, elSize);
       return;
     }
 
-    const slDistPct = Math.abs(entry - sl) / entry;
-    if (slDistPct <= 0) { reset(elLoss, elProfit, elRatio, elSize, elMargin); warnEl.style.display = 'none'; return; }
-
-    // Core formulas
-    const positionSize = usdRisk / slDistPct;           // USD notional
+    // MEXC-native formulas:
+    // USD Risk = Margin (collateral posted)
+    // Position Size (notional) = USD Risk × Leverage
+    // Contracts = Position Size / Entry Price
+    const positionSize = usdRisk * leverage;
     const contracts    = positionSize / entry;
-    const loss         = usdRisk;                        // always = USD Risk
-    const margin       = leverage > 0 ? positionSize / leverage : 0;
-
-    // Minimum risk warning: min 1 contract → minRisk = entry × slDistPct
-    const minRisk = entry * slDistPct;
-    if (contracts < 1) {
-      warnEl.textContent = '⚠ Too small — Min Risk: $' + fmt(minRisk);
-      warnEl.style.display = 'block';
-    } else {
-      warnEl.style.display = 'none';
-    }
-
-    elLoss.textContent = '-$' + fmt(loss);
-    elLoss.className   = 'msp-rr-val loss';
 
     elSize.textContent = '$' + fmt(positionSize);
     elSize.className   = 'msp-rr-val';
 
-    elMargin.textContent = leverage > 0 ? '$' + fmt(margin) : '—';
-    elMargin.className   = 'msp-rr-val';
+    if (sl > 0) {
+      const loss = contracts * Math.abs(entry - sl);
+      elLoss.textContent = '-$' + fmt(loss);
+      elLoss.className   = 'msp-rr-val loss';
 
-    if (tp <= 0) {
-      reset(elProfit, elRatio);
-      return;
+      if (tp > 0) {
+        const profit = contracts * Math.abs(tp - entry);
+        const ratio  = profit / loss;
+        elProfit.textContent = '+$' + fmt(profit);
+        elProfit.className   = 'msp-rr-val profit';
+        elRatio.textContent  = '1 : ' + fmt(ratio);
+        elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
+      } else {
+        reset(elProfit, elRatio);
+      }
+    } else {
+      reset(elLoss, elProfit, elRatio);
+
+      if (tp > 0) {
+        const profit = contracts * Math.abs(tp - entry);
+        elProfit.textContent = '+$' + fmt(profit);
+        elProfit.className   = 'msp-rr-val profit';
+      }
     }
-
-    const profit = contracts * Math.abs(tp - entry);
-    const ratio  = profit / loss;
-
-    elProfit.textContent = '+$' + fmt(profit);
-    elProfit.className   = 'msp-rr-val profit';
-    elRatio.textContent  = '1 : ' + fmt(ratio);
-    elRatio.className    = 'msp-rr-val ratio' + (ratio >= 2 ? ' good' : ratio < 1 ? ' bad' : '');
   }
 
   // Wire live updates — both 'input' (typing) and 'change' (blur/arrow keys) on every field
