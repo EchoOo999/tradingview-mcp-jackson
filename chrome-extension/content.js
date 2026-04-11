@@ -195,26 +195,13 @@
             <span id="msp-rr-long-tp" class="msp-rr-val">—</span>
           </div>
           <div class="msp-rr-cell">
-            <span class="msp-rr-label">Short PNL @ TP</span>
-            <span id="msp-rr-short-tp" class="msp-rr-val">—</span>
-          </div>
-
-          <div class="msp-rr-cell">
             <span class="msp-rr-label">Long PNL @ SL</span>
             <span id="msp-rr-long-sl" class="msp-rr-val">—</span>
           </div>
-          <div class="msp-rr-cell">
-            <span class="msp-rr-label">Short PNL @ SL</span>
-            <span id="msp-rr-short-sl" class="msp-rr-val">—</span>
-          </div>
 
-          <div class="msp-rr-cell">
-            <span class="msp-rr-label">Liq Long</span>
+          <div class="msp-rr-cell msp-rr-cell-full">
+            <span class="msp-rr-label">Liq Price (Long)</span>
             <span id="msp-rr-liq-long" class="msp-rr-val">—</span>
-          </div>
-          <div class="msp-rr-cell">
-            <span class="msp-rr-label">Liq Short</span>
-            <span id="msp-rr-liq-short" class="msp-rr-val">—</span>
           </div>
 
         </div>
@@ -353,10 +340,9 @@
     const entry    = parseFloat(entryInput.value)                              || 0;
 
     const allIds = [
-      'msp-rr-qty','msp-rr-margin',
-      'msp-rr-long-tp','msp-rr-short-tp',
-      'msp-rr-long-sl','msp-rr-short-sl',
-      'msp-rr-liq-long','msp-rr-liq-short',
+      'msp-rr-qty', 'msp-rr-margin',
+      'msp-rr-long-tp', 'msp-rr-long-sl',
+      'msp-rr-liq-long',
     ];
     function resetAll() {
       allIds.forEach(id => {
@@ -370,8 +356,9 @@
       el.textContent = text;
       el.className   = 'msp-rr-val ' + (cls || '');
     }
-    function setPnl(id, pnlUsd) {
-      const pct  = usdRisk > 0 ? (pnlUsd / usdRisk) * 100 : 0;
+    function setPnl(id, pnlUsd, margin) {
+      // % relative to margin (= Quantity / Leverage) — matches MEXC display
+      const pct  = margin > 0 ? (pnlUsd / margin) * 100 : 0;
       const sign = pnlUsd >= 0 ? '+' : '-';
       const cls  = pnlUsd >= 0 ? 'profit' : 'loss';
       setVal(id, `${sign}$${fmt(Math.abs(pnlUsd))} (${sign}${fmt(Math.abs(pct))}%)`, cls);
@@ -379,36 +366,34 @@
 
     if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { resetAll(); return; }
 
-    // Core — MEXC native formulas
-    const positionSize = usdRisk * leverage;   // Quantity (USDT notional)
-    const contracts    = positionSize / entry;  // contracts
-    const margin       = usdRisk;              // Margin = collateral posted
+    // MEXC native formulas:
+    // USD Risk input = Quantity (USDT notional), NOT the margin
+    // Contracts = Quantity / Entry
+    // Margin (collateral) = Quantity / Leverage
+    // PNL % = PNL / Margin × 100
+    const quantity  = usdRisk;
+    const contracts = quantity / entry;
+    const margin    = quantity / leverage;
 
-    setVal('msp-rr-qty',    '$' + fmt(positionSize), 'qty');
+    setVal('msp-rr-qty',    '$' + fmt(quantity), 'qty');
     setVal('msp-rr-margin', '$' + fmt(margin));
 
-    // Liquidation prices (0.005 = 0.5% maintenance margin)
-    const liqLong  = entry * (1 - 1 / leverage + 0.005);
-    const liqShort = entry * (1 + 1 / leverage - 0.005);
-    setVal('msp-rr-liq-long',  '$' + fmtPrice(liqLong),  'liq');
-    setVal('msp-rr-liq-short', '$' + fmtPrice(liqShort), 'liq');
+    // Liquidation price for long (0.005 = 0.5% maintenance margin)
+    const liqLong = entry * (1 - 1 / leverage + 0.005);
+    setVal('msp-rr-liq-long', '$' + fmtPrice(liqLong), 'liq');
 
-    // TP PNL
+    // Long PNL @ TP
     if (tp > 0) {
-      setPnl('msp-rr-long-tp',   contracts * (tp - entry));   // long wins if TP > entry
-      setPnl('msp-rr-short-tp',  contracts * (entry - tp));   // short wins if TP < entry
+      setPnl('msp-rr-long-tp', contracts * (tp - entry), margin);
     } else {
-      setVal('msp-rr-long-tp',  '—');
-      setVal('msp-rr-short-tp', '—');
+      setVal('msp-rr-long-tp', '—');
     }
 
-    // SL PNL
+    // Long PNL @ SL
     if (sl > 0) {
-      setPnl('msp-rr-long-sl',  contracts * (sl - entry));   // long loses if SL < entry
-      setPnl('msp-rr-short-sl', contracts * (entry - sl));   // short loses if SL > entry
+      setPnl('msp-rr-long-sl', contracts * (sl - entry), margin);
     } else {
-      setVal('msp-rr-long-sl',  '—');
-      setVal('msp-rr-short-sl', '—');
+      setVal('msp-rr-long-sl', '—');
     }
   }
 

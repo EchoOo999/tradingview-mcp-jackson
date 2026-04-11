@@ -272,6 +272,10 @@
   gap: 2px;
 }
 
+.msp-rr-cell-full {
+  grid-column: 1 / -1;
+}
+
 .msp-rr-label {
   font-size: 9px;
   color: #4a4e5c;
