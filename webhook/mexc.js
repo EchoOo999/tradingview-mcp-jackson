@@ -180,15 +180,11 @@ export async function placeOrder(params) {
     contractPrice = parseFloat(tickerData.data.lastPrice || tickerData.data.indexPrice);
   }
 
-  // sl_distance_pct = |entry - sl| / entry
-  // position_value_usd = usd_risk / sl_distance_pct
-  // volume (contracts) = position_value_usd / entry_price * leverage
-  const slDistance = Math.abs(contractPrice - sl) / contractPrice;
-  if (slDistance <= 0) throw new Error('SL price must differ from entry price');
-
-  const positionValueUsd = usd_risk / slDistance;
-  const volume = Math.floor((positionValueUsd / contractPrice) * leverage);
-  if (volume < 1) throw new Error(`Computed volume < 1 contract. Increase usd_risk or leverage.`);
+  // usd_risk = full USDT quantity (position notional) — NOT margin, NOT max loss
+  // volume (contracts in BTC) = usd_risk / current_price
+  const volume = usd_risk / contractPrice;
+  console.log(`[${new Date().toISOString()}] Volume calc: usd_risk=${usd_risk} / price=${contractPrice} = ${volume} contracts`);
+  if (volume <= 0) throw new Error(`Computed volume is zero. Check usd_risk and price.`);
 
   // Place the market/limit order
   const orderBody = {
@@ -231,9 +227,9 @@ export async function placeOrder(params) {
     leverage,
     volume,
     entryPrice: contractPrice,
+    positionUsd: Math.round(usd_risk * 100) / 100,
     tp: tp || null,
     sl: sl || null,
-    positionValueUsd: Math.round(positionValueUsd * 100) / 100,
     tpslAttached: tpslResult !== null,
   };
 }

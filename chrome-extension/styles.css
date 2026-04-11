@@ -410,22 +410,6 @@
   color: #fff;
 }
 
-/* ── Payload Debug Display ── */
-
-.msp-payload-display {
-  margin-top: 6px;
-  padding: 6px 8px;
-  background: #0a0d14;
-  border: 1px solid #2a2d3a;
-  border-radius: 5px;
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 10px;
-  color: #787b86;
-  white-space: pre;
-  overflow-x: auto;
-  line-height: 1.5;
-}
-
 /* ── Status ── */
 
 #msp-status {
