@@ -19,13 +19,20 @@ async function getVolumeDecimals(symbol) {
   try {
     const res  = await fetch(`${BASE_URL}/api/v1/contract/detail?symbol=${symbol}`);
     const data = await res.json();
-    if ((data.code === 0 || data.code === 200) && data.data?.volumeDecimal !== undefined) {
-      const dec = Number(data.data.volumeDecimal);
-      volumeDecimalCache[symbol] = dec;
-      console.log(`[contract detail] ${symbol} volumeDecimal=${dec} (minVol=${data.data.minVol})`);
-      return dec;
+    if ((data.code === 0 || data.code === 200) && data.data) {
+      console.log(`[contract detail] ${symbol} ALL fields:`, JSON.stringify(data.data));
+      // Try known field names in priority order
+      const raw = data.data.volDecimalPlace ?? data.data.volumeDecimal ?? data.data.contractSize ?? data.data.minVol;
+      if (raw !== undefined) {
+        const dec = Number(raw);
+        volumeDecimalCache[symbol] = dec;
+        console.log(`[contract detail] ${symbol} using precision=${dec}`);
+        return dec;
+      }
+      console.warn(`[contract detail] No precision field found for ${symbol}`);
+    } else {
+      console.warn(`[contract detail] Unexpected response for ${symbol}:`, JSON.stringify(data).slice(0, 200));
     }
-    console.warn(`[contract detail] Unexpected response for ${symbol}:`, JSON.stringify(data).slice(0, 200));
   } catch (e) {
     console.warn(`[contract detail] Fetch failed for ${symbol}: ${e.message}`);
   }
@@ -61,18 +68,32 @@ async function request(method, path, body, apiKey, apiSecret) {
   const bodyStr = body ? JSON.stringify(body) : '';
   const signature = sign(apiSecret, apiKey, timestamp, bodyStr);
 
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const url = `${BASE_URL}${path}`;
+  const headers = {
+    'ApiKey': apiKey,
+    'Request-Time': timestamp,
+    'Signature': signature,
+    'Content-Type': 'application/json',
+  };
+
+  console.log(`[MEXC req] ${method} ${path} | ts=${timestamp} | sig=${signature.slice(0, 16)}... | body=${bodyStr.slice(0, 120)}`);
+
+  const res = await fetch(url, {
     method,
-    headers: {
-      'ApiKey': apiKey,
-      'Request-Time': timestamp,
-      'Signature': signature,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: bodyStr || undefined,
   });
 
-  const data = await res.json();
+  const text = await res.text();
+  console.log(`[MEXC res ${res.status}] ${text.slice(0, 500)}`);
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    throw new Error(`Non-JSON response (${res.status}): ${text.slice(0, 200)}`);
+  }
+
   if (!res.ok || (data.code !== 0 && data.code !== 200)) {
     const msg = data.message || data.msg || JSON.stringify(data);
     throw new Error(`MEXC API error ${data.code || res.status}: ${msg}`);
@@ -97,7 +118,11 @@ export async function getBalance(apiKey, apiSecret) {
       const res = await fetch(`https://api.mexc.com/api/v3/account?${qs}&signature=${sig}`, {
         headers: { 'X-MEXC-APIKEY': apiKey },
       });
-      const json = await res.json();
+      const rawSpot = await res.text();
+      console.log(`[Spot res ${res.status}] ${rawSpot.slice(0, 500)}`);
+      let json;
+      try { json = JSON.parse(rawSpot); }
+      catch (_) { throw new Error(`Spot non-JSON (${res.status}): ${rawSpot.slice(0, 200)}`); }
       if (json.code) throw new Error(`Spot API: ${json.msg || json.message}`);
       return json;
     })(),
@@ -223,7 +248,7 @@ export async function placeOrder(params) {
   // Place the market/limit order
   const orderBody = {
     symbol,
-    price: type === 'limit' ? price : 0,
+    ...(type === 'limit' ? { price } : {}),
     vol: volume,
     leverage,
     side: mexcSide,
