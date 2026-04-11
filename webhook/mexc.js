@@ -6,6 +6,21 @@ import crypto from 'crypto';
 
 const BASE_URL = 'https://contract.mexc.com';
 
+// Minimum contract step per base coin (MEXC precision specs)
+const CONTRACT_DECIMALS = {
+  BTC: 4,
+  ETH: 3,
+  SOL: 1,
+};
+const DEFAULT_DECIMALS = 4;
+
+function roundVolume(rawVolume, symbol) {
+  const base     = symbol.split('_')[0].toUpperCase();
+  const decimals = CONTRACT_DECIMALS[base] ?? DEFAULT_DECIMALS;
+  const factor   = Math.pow(10, decimals);
+  return Math.floor(rawVolume * factor) / factor;
+}
+
 // MEXC side codes
 const SIDE = {
   open_long:   1,
@@ -181,10 +196,11 @@ export async function placeOrder(params) {
   }
 
   // usd_risk = full USDT quantity (position notional) — NOT margin, NOT max loss
-  // volume (contracts in BTC) = usd_risk / current_price
-  const volume = usd_risk / contractPrice;
-  console.log(`[${new Date().toISOString()}] Volume calc: usd_risk=${usd_risk} / price=${contractPrice} = ${volume} contracts`);
-  if (volume <= 0) throw new Error(`Computed volume is zero. Check usd_risk and price.`);
+  // volume (contracts) = usd_risk / current_price, rounded down to coin precision
+  const rawVolume = usd_risk / contractPrice;
+  const volume    = roundVolume(rawVolume, symbol);
+  console.log(`[${new Date().toISOString()}] Volume calc: usd_risk=${usd_risk} / price=${contractPrice} = ${rawVolume} → rounded ${volume} contracts`);
+  if (volume <= 0) throw new Error(`Computed volume rounds to zero. Increase usd_risk (min ~${contractPrice * Math.pow(10, -(CONTRACT_DECIMALS[symbol.split('_')[0]] ?? DEFAULT_DECIMALS))} USDT).`);
 
   // Place the market/limit order
   const orderBody = {
