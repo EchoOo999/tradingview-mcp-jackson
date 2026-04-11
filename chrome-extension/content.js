@@ -228,6 +228,7 @@
       <button id="msp-push-btn" class="msp-push-btn push-idle">Select direction</button>
 
       <div id="msp-status" class="empty"></div>
+      <div id="msp-payload-display" class="msp-payload-display" style="display:none"></div>
 
       <!-- Wallet Balance -->
       <div id="msp-balance-box">
@@ -604,6 +605,12 @@
 
     pushButton.disabled    = true;
     pushButton.textContent = 'SENDING...';
+
+    const payloadJson = JSON.stringify(payload, null, 2);
+    console.log('[MEXC Scalp] Sending payload:', payloadJson);
+    const payloadDisplay = document.getElementById('msp-payload-display');
+    payloadDisplay.textContent = payloadJson;
+    payloadDisplay.style.display = 'block';
 
     try {
       const res  = await fetch(WEBHOOK_URL, {
