@@ -190,7 +190,7 @@
         </div>
         <div class="msp-rr-grid">
 
-          <div class="msp-rr-cell msp-rr-cell-full">
+          <div class="msp-rr-cell">
             <span class="msp-rr-label">Position Size</span>
             <span id="msp-rr-qty" class="msp-rr-val">—</span>
           </div>
@@ -358,11 +358,10 @@
     // slider + balance so the input field is never a stale intermediate.
     let usdRisk;
     const riskInput = document.getElementById('msp-risk');
-    if (riskToggle.getValue() === 'pct' && lastBalance > 0 && leverage > 0) {
+    if (riskToggle.getValue() === 'pct' && lastBalance > 0) {
       const pct = parseInt(document.getElementById('msp-risk-slider').value, 10);
-      // % of available buying power (balance × leverage), matching MEXC position calculator
-      usdRisk = (pct / 100) * lastBalance * leverage;
-      // Show the resulting USDT position size in the input so user can see it
+      // % of balance = margin amount; position size = margin × leverage (done below)
+      usdRisk = (pct / 100) * lastBalance;
       riskInput.value = usdRisk.toFixed(2);
     } else {
       usdRisk = parseFloat(riskInput.value) || 0;
@@ -395,13 +394,13 @@
     if (entry <= 0 || usdRisk <= 0 || leverage <= 0) { resetAll(); return; }
 
     // MEXC native formulas:
-    // USD Risk input = Quantity (USDT notional)
-    // Contracts = Quantity / Entry
-    // Margin (collateral) = Quantity / Leverage
+    // USD Risk input = Margin (collateral posted)
+    // Position Size (notional) = Margin × Leverage
+    // Contracts = Position Size / Entry
     // PNL % = PNL / Margin × 100
-    const quantity  = usdRisk;
+    const margin    = usdRisk;
+    const quantity  = usdRisk * leverage;
     const contracts = quantity / entry;
-    const margin    = quantity / leverage;
 
     const coin    = getBaseCoin();
     const coinAmt = fmt(contracts, 4) + (coin ? ' ' + coin : '');
@@ -594,8 +593,17 @@
     if (sl > 0) payload.sl = sl;
 
     const pushButton = document.getElementById('msp-push-btn');
-    pushButton.disabled = true;
-    setStatus('⏳ Sending…', 'loading', 0);
+    const savedText  = pushButton.textContent;
+    const savedClass = pushButton.className;
+
+    function restorePush() {
+      pushButton.disabled  = false;
+      pushButton.textContent = savedText;
+      pushButton.className   = savedClass;
+    }
+
+    pushButton.disabled    = true;
+    pushButton.textContent = 'SENDING...';
 
     try {
       const res  = await fetch(WEBHOOK_URL, {
@@ -609,14 +617,18 @@
 
       if (res.ok) {
         const dir = side === 'open_long' ? '🟢 LONG' : '🔴 SHORT';
+        pushButton.textContent = '✅ SENT';
         setStatus(`✅ ${dir} ${symbol} sent`, 'success');
+        setTimeout(restorePush, 2000);
       } else {
+        pushButton.textContent = '❌ FAILED';
         setStatus(`❌ ${res.status}: ${data.message || data.error || text}`, 'error', 6000);
+        setTimeout(restorePush, 3000);
       }
     } catch (err) {
+      pushButton.textContent = '❌ FAILED';
       setStatus(`❌ Network error: ${err.message}`, 'error', 6000);
-    } finally {
-      pushButton.disabled = false;
+      setTimeout(restorePush, 3000);
     }
   }
 
