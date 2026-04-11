@@ -255,7 +255,10 @@
 
   function startMarketFill() {
     stopMarketFill();
+    // Attempt immediately, then retry quickly in case chart DOM hasn't settled
     syncEntryPrice();
+    setTimeout(syncEntryPrice, 150);
+    setTimeout(syncEntryPrice, 400);
     marketInterval = setInterval(syncEntryPrice, 2000);
   }
 
@@ -339,10 +342,11 @@
     // slider + balance so the input field is never a stale intermediate.
     let usdRisk;
     const riskInput = document.getElementById('msp-risk');
-    if (riskToggle.getValue() === 'pct' && lastBalance > 0) {
+    if (riskToggle.getValue() === 'pct' && lastBalance > 0 && leverage > 0) {
       const pct = parseInt(document.getElementById('msp-risk-slider').value, 10);
-      usdRisk = (pct / 100) * lastBalance;
-      // Keep the input showing the equivalent USDT amount
+      // % of available buying power (balance × leverage), matching MEXC position calculator
+      usdRisk = (pct / 100) * lastBalance * leverage;
+      // Show the resulting USDT position size in the input so user can see it
       riskInput.value = usdRisk.toFixed(2);
     } else {
       usdRisk = parseFloat(riskInput.value) || 0;
