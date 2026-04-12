@@ -341,37 +341,43 @@ async function scanSymbol(symbol) {
   // ── Analysis ────────────────────────────────────────────────────────────────
   if (bars5m.length < 30 || bars1h.length < 50) return;
 
-  // PWH/PWL = highest high + lowest low of last 20 days on 1H (480 bars)
-  const refBars = bars1h.slice(-480);
-  const PWH     = Math.max(...refBars.map(b => b.high));
-  const PWL     = Math.min(...refBars.map(b => b.low));
+  try {
+    // PWH/PWL = highest high + lowest low of last 20 days on 1H (480 bars)
+    const refBars = bars1h.slice(-480);
+    const PWH     = Math.max(...refBars.map(b => b.high));
+    const PWL     = Math.min(...refBars.map(b => b.low));
 
-  // Second-to-last 5m bar = last fully closed candle
-  const sfpBar      = bars5m[bars5m.length - 2];
-  const currentPrice = bars5m[bars5m.length - 1].close;
-  if (!sfpBar) return;
+    if (!isFinite(PWH) || !isFinite(PWL)) return; // bad kline data — skip
 
-  const isLongSFP  = sfpBar.low  < PWL && sfpBar.close > PWL;
-  const isShortSFP = sfpBar.high > PWH && sfpBar.close < PWH;
-  if (!isLongSFP && !isShortSFP) return;
+    // Second-to-last 5m bar = last fully closed candle
+    const sfpBar       = bars5m[bars5m.length - 2];
+    const currentPrice = bars5m[bars5m.length - 1].close;
+    if (!sfpBar) return;
 
-  for (const direction of ['long', 'short']) {
-    if (direction === 'long'  && !isLongSFP)  continue;
-    if (direction === 'short' && !isShortSFP) continue;
-    if (wasAlertedRecently(symbol, direction)) continue;
+    const isLongSFP  = sfpBar.low  < PWL && sfpBar.close > PWL;
+    const isShortSFP = sfpBar.high > PWH && sfpBar.close < PWH;
+    if (!isLongSFP && !isShortSFP) return;
 
-    const hasDivergence = checkDivergence(bars5m, direction);
-    const location      = checkGSLocation(bars1h, direction, currentPrice);
+    for (const direction of ['long', 'short']) {
+      if (direction === 'long'  && !isLongSFP)  continue;
+      if (direction === 'short' && !isShortSFP) continue;
+      if (wasAlertedRecently(symbol, direction)) continue;
 
-    console.log(
-      `[scanner] ★ SIGNAL ${symbol} ${direction.toUpperCase()} | ` +
-      `location=${location || 'none'} | div=${hasDivergence} | ` +
-      `PWH=${PWH.toFixed(4)} PWL=${PWL.toFixed(4)} | ` +
-      `sfp.high=${sfpBar.high} sfp.low=${sfpBar.low} sfp.close=${sfpBar.close}`
-    );
+      const hasDivergence = checkDivergence(bars5m, direction);
+      const location      = checkGSLocation(bars1h, direction, currentPrice);
 
-    await sendTelegram(buildAlertMessage(symbol, direction, location, hasDivergence));
-    markAlerted(symbol, direction);
+      console.log(
+        `[scanner] ★ SIGNAL ${symbol} ${direction.toUpperCase()} | ` +
+        `location=${location || 'none'} | div=${hasDivergence} | ` +
+        `PWH=${PWH.toFixed(4)} PWL=${PWL.toFixed(4)} | ` +
+        `sfp.high=${sfpBar.high} sfp.low=${sfpBar.low} sfp.close=${sfpBar.close}`
+      );
+
+      await sendTelegram(buildAlertMessage(symbol, direction, location, hasDivergence));
+      markAlerted(symbol, direction);
+    }
+  } catch (err) {
+    console.error(`[scanner] ${symbol} analysis error: ${err.message}`);
   }
 }
 
@@ -450,11 +456,31 @@ export function startScanner() {
   console.log('[scanner] Rate limit design: sequential | ~0.7 req/s | 50% of 10 req/s max');
   console.log('[scanner] Dedup window: 4h | Rate limit pause: 10min | Scan cooldown: 5min');
 
-  // Use setTimeout chain so scans NEVER overlap regardless of how long they take
+  // Catch unhandled rejections at process level — prevents Node from crashing
+  // on any unexpected async error that escapes our per-function try-catch blocks.
+  process.on('unhandledRejection', (reason) => {
+    console.error('[scanner] Unhandled rejection (caught at process level):', reason);
+    // Do NOT exit — log and continue. Railway keeps the process alive.
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[scanner] Uncaught exception (caught at process level):', err.message);
+    // Do NOT exit — log and continue.
+  });
+
+  // Use setTimeout chain so scans NEVER overlap regardless of how long they take.
+  // .catch() on scheduleNext() prevents an unhandled rejection from crashing Node.
   async function scheduleNext() {
-    await scanAll();
+    try {
+      await scanAll();
+    } catch (err) {
+      // scanAll() has comprehensive try-catch internally, but this is the final safety net.
+      console.error('[scanner] Unexpected error in scanAll (caught in scheduleNext):', err.message);
+      isScanning = false; // ensure we don't get stuck
+    }
     setTimeout(scheduleNext, SCAN_COOLDOWN_MS);
   }
 
-  scheduleNext();
+  scheduleNext().catch(err => {
+    console.error('[scanner] scheduleNext() rejected unexpectedly:', err.message);
+  });
 }
