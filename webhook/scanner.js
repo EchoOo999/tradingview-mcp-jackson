@@ -115,13 +115,47 @@ async function fetchJSON(url) {
 }
 
 // ── MEXC public data ──────────────────────────────────────────────────────────
+const MIN_VOLUME_USDT = 50_000_000; // 50M USDT 24h minimum
+
+/**
+ * Fetches all symbols from /contract/detail, then filters by:
+ *   - ends with _USDT
+ *   - does NOT contain "STOCK"
+ *   - 24h USDT volume (amount24) > 50M  (from /contract/ticker)
+ *
+ * Returns filtered symbol list and logs counts.
+ * Note: /contract/detail is rate-limited to 1 req/5s — caller must sleep after.
+ */
 async function fetchAllSymbols() {
-  const data = await fetchJSON(`${MEXC_BASE}/api/v1/contract/detail`);
-  if (data.code !== 200 && data.code !== 0) throw new Error(`contract/detail error: ${data.message}`);
-  const symbols = (data.data || [])
-    .filter(c => c.symbol && c.symbol.endsWith('_USDT'))
+  // Step 1: all _USDT symbols (no STOCK)
+  const detailData = await fetchJSON(`${MEXC_BASE}/api/v1/contract/detail`);
+  if (detailData.code !== 200 && detailData.code !== 0) throw new Error(`contract/detail error: ${detailData.message}`);
+
+  const base = (detailData.data || [])
+    .filter(c => c.symbol && c.symbol.endsWith('_USDT') && !c.symbol.includes('STOCK'))
     .map(c => c.symbol);
-  return symbols;
+
+  // Step 2: 24h ticker for volume filter (single request, all symbols)
+  // /contract/ticker has same 20req/2s limit — one call, no issue
+  await sleep(5000); // respect /contract/detail 1req/5s before next call
+  const tickerData = await fetchJSON(`${MEXC_BASE}/api/v1/contract/ticker`);
+  if (tickerData.code !== 200 && tickerData.code !== 0) throw new Error(`contract/ticker error: ${tickerData.message}`);
+
+  // Build volume map: symbol → amount24 (USDT turnover)
+  const volumeMap = new Map();
+  for (const t of (tickerData.data || [])) {
+    if (t.symbol) volumeMap.set(t.symbol, parseFloat(t.amount24 || 0));
+  }
+
+  // Step 3: apply volume filter
+  const filtered = base.filter(sym => (volumeMap.get(sym) ?? 0) >= MIN_VOLUME_USDT);
+
+  console.log(
+    `[scanner] Symbol filter: ${base.length} _USDT (no STOCK) → ` +
+    `${filtered.length} pass 50M volume | dropped ${base.length - filtered.length}`
+  );
+
+  return filtered;
 }
 
 /**
@@ -365,11 +399,8 @@ async function scanAll() {
 
   let symbols;
   try {
-    symbols = await fetchAllSymbols();
-    // contract/detail is limited to 1 req / 5s — wait after fetching it
-    await sleep(5000);
-    console.log(`[scanner] ${symbols.length} USDT perpetuals to scan`);
-    console.log(`[scanner] Rate: ~1 req/s sequential | ETA: ~${Math.ceil(symbols.length * 2 / 60)}min`);
+    symbols = await fetchAllSymbols(); // includes 5s sleep + volume filter internally
+    console.log(`[scanner] ${symbols.length} coins queued | ETA: ~${Math.ceil(symbols.length * 2 / 60)}min`);
   } catch (err) {
     console.error(`[scanner] fetchAllSymbols failed: ${err.message}`);
     clearInterval(rpmTimer);
