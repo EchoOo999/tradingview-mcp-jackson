@@ -28,8 +28,8 @@ const RECONNECT_MAX_MS  = 60_000;
 const VOLUME_REFRESH_MS = 6 * 60 * 60 * 1000; // 6h between top-50 refreshes
 const ALERT_RESET_MS    = 4 * 60 * 60 * 1000; // 4h dedup window
 
-const TOP_N             = 50;
-const MIN_VOLUME_USDT   = 50_000_000;          // 50M USDT 24h
+const TOP_N             = 250;                 // raised — 5M filter is the real gate
+const MIN_VOLUME_USDT   = 5_000_000;           // 5M USDT 24h (~206 coins currently)
 
 const BOOTSTRAP_5M      = 100;
 const BOOTSTRAP_1H      = 500;                 // ~20 days
