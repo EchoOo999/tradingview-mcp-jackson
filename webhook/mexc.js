@@ -16,6 +16,13 @@ const volumeDecimalCache = {};
 async function getVolumeDecimals(symbol) {
   if (volumeDecimalCache[symbol] !== undefined) return volumeDecimalCache[symbol];
 
+  // Temporary hardcode: BTC_USDT → 2dp (0.0139 → 0.01) to isolate vol precision issue
+  if (symbol === 'BTC_USDT') {
+    console.log(`[contract detail] BTC_USDT: hardcoded decimals=2 (test override)`);
+    volumeDecimalCache[symbol] = 2;
+    return 2;
+  }
+
   try {
     const res  = await fetch(`${BASE_URL}/api/v1/contract/detail?symbol=${symbol}`);
     const data = await res.json();
@@ -248,15 +255,19 @@ export async function placeOrder(params) {
   if (volume <= 0) throw new Error(`Volume rounds to zero at ${decimals}dp. Min usd_risk ≈ $${(contractPrice / factor).toFixed(2)}.`);
 
   // Place the market/limit order
+  // NOTE: price must be completely absent for market orders — explicit assignment only for limit
   const orderBody = {
     symbol,
-    ...(type === 'limit' ? { price } : {}),
     vol: volume,
     leverage,
     side: mexcSide,
     type: ORDER_TYPE[type] ?? ORDER_TYPE.market,
     openType,
   };
+  if (type === 'limit' && price != null) {
+    orderBody.price = price;
+  }
+  console.log(`[order] type=${type} | price field included: ${type === 'limit' && price != null}`);
 
   console.log(`[${new Date().toISOString()}] Submitting order: ${JSON.stringify(orderBody)}`);
   const orderId = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
