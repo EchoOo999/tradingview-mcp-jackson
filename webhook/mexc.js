@@ -6,51 +6,34 @@ import crypto from 'crypto';
 
 const BASE_URL = 'https://contract.mexc.com';
 
-// Fallback precision per base coin if contract detail fetch fails
-const FALLBACK_DECIMALS = { BTC: 4, ETH: 3, SOL: 1 };
-const DEFAULT_DECIMALS  = 4;
+// Cache contractSize per symbol (fetched once from MEXC contract detail)
+// vol = integer contracts = floor(usd_risk / (price × contractSize))
+const contractSizeCache = {};
 
-// Cache volumeDecimal per symbol (fetched once from MEXC contract detail)
-const volumeDecimalCache = {};
-
-async function getVolumeDecimals(symbol) {
-  if (volumeDecimalCache[symbol] !== undefined) return volumeDecimalCache[symbol];
-
-  // Temporary hardcode: BTC_USDT → 2dp (0.0139 → 0.01) to isolate vol precision issue
-  if (symbol === 'BTC_USDT') {
-    console.log(`[contract detail] BTC_USDT: hardcoded decimals=2 (test override)`);
-    volumeDecimalCache[symbol] = 2;
-    return 2;
-  }
+async function getContractSize(symbol) {
+  if (contractSizeCache[symbol] !== undefined) return contractSizeCache[symbol];
 
   try {
     const res  = await fetch(`${BASE_URL}/api/v1/contract/detail?symbol=${symbol}`);
     const data = await res.json();
-    if ((data.code === 0 || data.code === 200) && data.data) {
-      console.log(`[contract detail] ${symbol} ALL fields:`, JSON.stringify(data.data));
-      // Try known field names in priority order
-      const raw = data.data.volDecimalPlace ?? data.data.volumeDecimal ?? data.data.contractSize ?? data.data.minVol;
-      if (raw !== undefined) {
-        const num = Number(raw);
-        // If value < 1 it's a minVol (e.g. 0.0001) — convert to decimal count
-        const dec = num < 1 ? Math.round(-Math.log10(num)) : num;
-        volumeDecimalCache[symbol] = dec;
-        console.log(`[contract detail] ${symbol} raw=${num} → decimals=${dec}`);
-        return dec;
-      }
-      console.warn(`[contract detail] No precision field found for ${symbol}`);
-    } else {
-      console.warn(`[contract detail] Unexpected response for ${symbol}:`, JSON.stringify(data).slice(0, 200));
+    if ((data.code === 0 || data.code === 200) && data.data?.contractSize) {
+      const size = Number(data.data.contractSize);
+      contractSizeCache[symbol] = size;
+      console.log(`[contract detail] ${symbol} contractSize=${size} minVol=${data.data.minVol} volScale=${data.data.volScale}`);
+      return size;
     }
+    console.warn(`[contract detail] No contractSize for ${symbol}:`, JSON.stringify(data).slice(0, 200));
   } catch (e) {
     console.warn(`[contract detail] Fetch failed for ${symbol}: ${e.message}`);
   }
 
+  // Fallback contractSize per known base coins
+  const FALLBACK = { BTC: 0.0001, ETH: 0.01, SOL: 0.1 };
   const base = symbol.split('_')[0].toUpperCase();
-  const dec  = FALLBACK_DECIMALS[base] ?? DEFAULT_DECIMALS;
-  console.warn(`[contract detail] Using fallback decimals=${dec} for ${symbol}`);
-  volumeDecimalCache[symbol] = dec;
-  return dec;
+  const size = FALLBACK[base] ?? 1;
+  console.warn(`[contract detail] Using fallback contractSize=${size} for ${symbol}`);
+  contractSizeCache[symbol] = size;
+  return size;
 }
 
 // MEXC side codes
@@ -245,14 +228,12 @@ export async function placeOrder(params) {
     contractPrice = parseFloat(tickerData.data.lastPrice || tickerData.data.indexPrice);
   }
 
-  // usd_risk = full USDT quantity (position notional) — NOT margin, NOT max loss
-  // volume (contracts) = usd_risk / current_price, rounded DOWN to MEXC volumeDecimal
-  const decimals  = await getVolumeDecimals(symbol);
-  const factor    = Math.pow(10, decimals);
-  const rawVolume = usd_risk / contractPrice;
-  const volume    = Math.floor(rawVolume * factor) / factor;
-  console.log(`[${new Date().toISOString()}] Volume calc: ${usd_risk} / ${contractPrice} = ${rawVolume} → floor(${decimals}dp) = ${volume}`);
-  if (volume <= 0) throw new Error(`Volume rounds to zero at ${decimals}dp. Min usd_risk ≈ $${(contractPrice / factor).toFixed(2)}.`);
+  // vol is an integer number of contracts (volScale=0, minVol=1 on MEXC)
+  // contracts = floor(usd_risk / (price × contractSize))
+  const contractSize = await getContractSize(symbol);
+  const volume       = Math.floor(usd_risk / (contractPrice * contractSize));
+  console.log(`[${new Date().toISOString()}] Volume calc: floor(${usd_risk} / (${contractPrice} × ${contractSize})) = ${volume} contracts`);
+  if (volume < 1) throw new Error(`Volume rounds to 0 contracts. Min usd_risk ≈ $${(contractPrice * contractSize).toFixed(2)}.`);
 
   // Place the market/limit order
   // NOTE: price must be completely absent for market orders — explicit assignment only for limit
