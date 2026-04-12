@@ -102,5 +102,5 @@ app.post('/webhook', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Webhook server listening on port ${PORT}`);
   console.log(`POST http://localhost:${PORT}/webhook`);
-  startScanner();
+  startScanner().catch(err => console.error('[scanner] startup error:', err.message));
 });

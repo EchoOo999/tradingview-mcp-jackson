@@ -1,37 +1,66 @@
 /**
- * SFP + GS Location Scanner for MEXC Perpetual Futures
+ * WebSocket-based SFP + GS Location Scanner — MEXC Perpetual Futures
  *
- * RATE LIMIT DESIGN (confirmed from MEXC docs):
- *   /contract/kline  → 20 req / 2s (= 10 req/s max). We target ~0.7 req/s (7% of max).
- *   /contract/detail → 1 req / 5s. Called once per scan cycle only.
- *   Error code 510   → "Excessive frequency of requests"
+ * One persistent WebSocket connection to wss://contract.mexc.com/edge
  *
- * SAFETY MODEL:
- *   - Fully sequential: one HTTP request at a time, no batching, no Promise.all
- *   - 500ms pause between the 5m and 1H request for the same coin
- *   - 1500ms pause after each coin (= ~2s per coin total = ~0.5 req/s average)
- *   - On any 510 / HTTP 429 response: exponential backoff (10s → 20s → 40s)
- *   - If still failing after 3 retries: pause the entire scanner for 10 minutes
- *   - Only one scan cycle runs at a time (overlap guard)
- *   - Logs requests/minute every 60 seconds
+ * REST is used ONLY for:
+ *   - Bootstrap: top-50 selection + initial kline history (once at startup)
+ *   - Volume refresh: re-select top-50 every 6h and update subscriptions
+ *
+ * WebSocket handles everything else:
+ *   - sub.kline (Min5 + Min60) for each top-50 coin
+ *   - Candle close detection: when WS sends a new timestamp for a symbol+interval,
+ *     the previous candle is finalized and SFP+GS detection runs immediately
  *
  * Read-only — no trading, no MEXC auth. Public endpoints only.
  */
 
-const MEXC_BASE        = 'https://contract.mexc.com';
-const TELEGRAM_API     = 'https://api.telegram.org';
+import WebSocket from 'ws';
 
-// ── Timing constants ──────────────────────────────────────────────────────────
-const DELAY_BETWEEN_REQUESTS_MS = 500;   // between 5m and 1H fetch for same coin
-const DELAY_BETWEEN_COINS_MS    = 1500;  // after finishing a coin before the next
-const SCAN_COOLDOWN_MS          = 5 * 60 * 1000;   // min gap between scan starts
-const RATE_LIMIT_PAUSE_MS       = 10 * 60 * 1000;  // full scanner pause on rate limit
-const BACKOFF_BASE_MS           = 10_000;           // first backoff: 10s
-const MAX_RETRIES               = 3;
+// ── Constants ─────────────────────────────────────────────────────────────────
+const WS_URL            = 'wss://contract.mexc.com/edge';
+const REST_BASE         = 'https://contract.mexc.com';
+const TELEGRAM_API      = 'https://api.telegram.org';
 
-// ── Dedup: { "SYMBOL:long" | "SYMBOL:short" → timestamp } ────────────────────
-const ALERT_RESET_MS = 4 * 60 * 60 * 1000; // 4 hours
-const alerted        = new Map();
+const PING_INTERVAL_MS  = 15_000;              // server drops conn after 60s no-ping
+const RECONNECT_BASE_MS = 2_000;
+const RECONNECT_MAX_MS  = 60_000;
+const VOLUME_REFRESH_MS = 6 * 60 * 60 * 1000; // 6h between top-50 refreshes
+const ALERT_RESET_MS    = 4 * 60 * 60 * 1000; // 4h dedup window
+
+const TOP_N             = 50;
+const MIN_VOLUME_USDT   = 50_000_000;          // 50M USDT 24h
+
+const BOOTSTRAP_5M      = 100;
+const BOOTSTRAP_1H      = 500;                 // ~20 days
+const BUFFER_MAX_5M     = 150;                 // rolling buffer cap
+const BUFFER_MAX_1H     = 550;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let ws             = null;
+let pingTimer      = null;
+let reconnectDelay = RECONNECT_BASE_MS;
+let disconnectedAt = 0;
+let shuttingDown   = false;
+
+// Kline history: symbol → { m5: Bar[], h1: Bar[] }
+// Bar = { time:number, open:number, high:number, low:number, close:number, vol:number }
+const klineBuffers = new Map();
+
+// Last seen candle-open timestamp from WS: "SYMBOL:Min5" → epochSeconds
+const lastWsTs     = new Map();
+
+// Last received WS data for the forming candle: "SYMBOL:Min5" → raw data obj
+const pendingBar   = new Map();
+
+// Current top-N symbols (updated every 6h)
+let topSymbols     = [];
+
+// Alert dedup: "SYMBOL:long" | "SYMBOL:short" → timestamp
+const alerted      = new Map();
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function wasAlertedRecently(symbol, direction) {
   const ts = alerted.get(`${symbol}:${direction}`);
@@ -41,146 +70,94 @@ function markAlerted(symbol, direction) {
   alerted.set(`${symbol}:${direction}`, Date.now());
 }
 
-// ── Requests-per-minute tracker ───────────────────────────────────────────────
-let reqCount   = 0;   // total requests in current 1-minute window
-let reqWindowStart = Date.now();
-
-function trackRequest() {
-  reqCount++;
-}
-function logRPM() {
-  const elapsed = (Date.now() - reqWindowStart) / 1000;
-  const rpm     = (reqCount / elapsed * 60).toFixed(1);
-  console.log(`[scanner:rpm] ${reqCount} requests in last ${elapsed.toFixed(0)}s → ~${rpm} req/min (limit ~600/min)`);
-  reqCount       = 0;
-  reqWindowStart = Date.now();
+// ── REST (bootstrap only) ─────────────────────────────────────────────────────
+async function restGet(path) {
+  const res = await fetch(`${REST_BASE}${path}`, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`REST ${path}: HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.code !== 0 && json.code !== 200) {
+    throw new Error(`REST ${path}: code ${json.code} — ${json.message || ''}`);
+  }
+  return json.data;
 }
 
-// ── Scanner state ─────────────────────────────────────────────────────────────
-let isScanning       = false;
-let rateLimitedUntil = 0;   // epoch ms — scanner paused until this time
+// ── Top-50 selection ──────────────────────────────────────────────────────────
+async function fetchTopSymbols() {
+  console.log('[scanner] Selecting top symbols via REST...');
 
-// ── Sleep helper ──────────────────────────────────────────────────────────────
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+  // Fetch detail + tickers in parallel (both are public, no auth needed)
+  const [detail, tickers] = await Promise.all([
+    restGet('/api/v1/contract/detail'),
+    restGet('/api/v1/contract/ticker'),
+  ]);
 
-// ── HTTP fetch with retry + exponential backoff ───────────────────────────────
-/**
- * Fetches a URL and returns parsed JSON.
- * On MEXC error code 510 or HTTP 429/418, backs off exponentially.
- * If all retries exhausted, sets rateLimitedUntil and throws.
- */
-async function fetchJSON(url) {
-  let attempt = 0;
-
-  while (attempt < MAX_RETRIES) {
-    trackRequest();
-    let res;
-    try {
-      res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    } catch (err) {
-      // Network/timeout error — not a rate limit, just rethrow
-      throw err;
-    }
-
-    // ── Rate limit detection ─────────────────────────────────────────────────
-    if (res.status === 429 || res.status === 418) {
-      const backoff = BACKOFF_BASE_MS * Math.pow(2, attempt);
-      console.warn(`[scanner] HTTP ${res.status} rate limit on ${url} — backoff ${backoff / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
-      await sleep(backoff);
-      attempt++;
-      continue;
-    }
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const data = await res.json();
-
-    // ── MEXC error code 510 ──────────────────────────────────────────────────
-    if (data.code === 510) {
-      const backoff = BACKOFF_BASE_MS * Math.pow(2, attempt);
-      console.warn(`[scanner] MEXC 510 (rate limit) on ${url} — backoff ${backoff / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
-      await sleep(backoff);
-      attempt++;
-      continue;
-    }
-
-    return data;
+  // amount24 = 24h USDT turnover (confirmed from docs)
+  const volMap = new Map();
+  for (const t of (tickers || [])) {
+    if (t.symbol) volMap.set(t.symbol, parseFloat(t.amount24 || 0));
   }
 
-  // All retries exhausted — pause the entire scanner for 10 minutes
-  const pauseUntil = new Date(Date.now() + RATE_LIMIT_PAUSE_MS).toISOString();
-  console.error(`[scanner] !! Rate limit retries exhausted. Pausing scanner until ${pauseUntil}`);
-  rateLimitedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
-  throw new Error('RATE_LIMIT_EXHAUSTED');
-}
-
-// ── MEXC public data ──────────────────────────────────────────────────────────
-const MIN_VOLUME_USDT = 50_000_000; // 50M USDT 24h minimum
-
-/**
- * Fetches all symbols from /contract/detail, then filters by:
- *   - ends with _USDT
- *   - does NOT contain "STOCK"
- *   - 24h USDT volume (amount24) > 50M  (from /contract/ticker)
- *
- * Returns filtered symbol list and logs counts.
- * Note: /contract/detail is rate-limited to 1 req/5s — caller must sleep after.
- */
-async function fetchAllSymbols() {
-  // Step 1: all _USDT symbols (no STOCK)
-  const detailData = await fetchJSON(`${MEXC_BASE}/api/v1/contract/detail`);
-  if (detailData.code !== 200 && detailData.code !== 0) throw new Error(`contract/detail error: ${detailData.message}`);
-
-  const base = (detailData.data || [])
+  const selected = (detail || [])
     .filter(c => c.symbol && c.symbol.endsWith('_USDT') && !c.symbol.includes('STOCK'))
+    .map(c => ({ symbol: c.symbol, vol: volMap.get(c.symbol) ?? 0 }))
+    .filter(c => c.vol >= MIN_VOLUME_USDT)
+    .sort((a, b) => b.vol - a.vol)
+    .slice(0, TOP_N)
     .map(c => c.symbol);
 
-  // Step 2: 24h ticker for volume filter (single request, all symbols)
-  // /contract/ticker has same 20req/2s limit — one call, no issue
-  await sleep(5000); // respect /contract/detail 1req/5s before next call
-  const tickerData = await fetchJSON(`${MEXC_BASE}/api/v1/contract/ticker`);
-  if (tickerData.code !== 200 && tickerData.code !== 0) throw new Error(`contract/ticker error: ${tickerData.message}`);
-
-  // Build volume map: symbol → amount24 (USDT turnover)
-  const volumeMap = new Map();
-  for (const t of (tickerData.data || [])) {
-    if (t.symbol) volumeMap.set(t.symbol, parseFloat(t.amount24 || 0));
-  }
-
-  // Step 3: apply volume filter
-  const filtered = base.filter(sym => (volumeMap.get(sym) ?? 0) >= MIN_VOLUME_USDT);
-
-  console.log(
-    `[scanner] Symbol filter: ${base.length} _USDT (no STOCK) → ` +
-    `${filtered.length} pass 50M volume | dropped ${base.length - filtered.length}`
-  );
-
-  return filtered;
+  console.log(`[scanner] ${selected.length} coins selected (≥${MIN_VOLUME_USDT / 1e6}M USDT volume)`);
+  return selected;
 }
 
-/**
- * Fetch klines for one symbol/interval.
- * Returns array of { time, open, high, low, close, vol } or null on soft failure.
- */
-async function fetchKlines(symbol, interval, limit) {
-  const url  = `${MEXC_BASE}/api/v1/contract/kline/${symbol}?interval=${interval}&limit=${limit}`;
-  const data = await fetchJSON(url);
+// ── Bootstrap kline history ───────────────────────────────────────────────────
+async function bootstrapKlines(symbols) {
+  console.log(`[scanner] Bootstrapping klines for ${symbols.length} coins...`);
+  let ok = 0;
 
-  if (data.code !== 200 && data.code !== 0) {
-    throw new Error(`kline ${interval} for ${symbol}: ${data.message}`);
+  for (const symbol of symbols) {
+    try {
+      const [raw5m, raw1h] = await Promise.all([
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Min5&limit=${BOOTSTRAP_5M}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Min60&limit=${BOOTSTRAP_1H}`),
+      ]);
+
+      // Exclude the last bar — it may be the currently-forming candle
+      const parse = d => {
+        if (!d || !Array.isArray(d.time) || !d.time.length) return [];
+        const end = d.time.length - 1; // skip last
+        return Array.from({ length: end }, (_, i) => ({
+          time:  d.time[i],
+          open:  parseFloat(d.open[i]),
+          high:  parseFloat(d.high[i]),
+          low:   parseFloat(d.low[i]),
+          close: parseFloat(d.close[i]),
+          vol:   parseFloat((d.vol || [])[i] || 0),
+        }));
+      };
+
+      klineBuffers.set(symbol, { m5: parse(raw5m), h1: parse(raw1h) });
+      ok++;
+    } catch (err) {
+      console.error(`[scanner] Bootstrap ${symbol}: ${err.message}`);
+      klineBuffers.set(symbol, { m5: [], h1: [] });
+    }
+
+    await sleep(400); // ~5 req/s during bootstrap — safely under 10/s MEXC limit
   }
 
-  const d = data.data;
-  if (!d || !Array.isArray(d.time) || !d.time.length) return [];
+  console.log(`[scanner] Bootstrap done: ${ok}/${symbols.length} symbols`);
+}
 
-  return d.time.map((t, i) => ({
-    time:  t,
-    open:  parseFloat(d.open[i]),
-    high:  parseFloat(d.high[i]),
-    low:   parseFloat(d.low[i]),
-    close: parseFloat(d.close[i]),
-    vol:   parseFloat((d.vol || [])[i] || 0),
-  }));
+// ── Kline buffer update ───────────────────────────────────────────────────────
+function pushBarToBuffer(symbol, interval, bar) {
+  const buf = klineBuffers.get(symbol);
+  if (!buf) return;
+
+  const arr = interval === 'Min5' ? buf.m5 : buf.h1;
+  const max = interval === 'Min5' ? BUFFER_MAX_5M : BUFFER_MAX_1H;
+
+  arr.push(bar);
+  if (arr.length > max) arr.shift();
 }
 
 // ── RSI (Wilder smoothed, period 14) ─────────────────────────────────────────
@@ -223,9 +200,9 @@ function findPivots(bars, lookback = 5) {
   return { highs, lows };
 }
 
-// ── RSI Divergence ────────────────────────────────────────────────────────────
+// ── RSI divergence ────────────────────────────────────────────────────────────
 function checkDivergence(bars5m, direction) {
-  const rsiArr      = calcRSI(bars5m.map(b => b.close));
+  const rsiArr = calcRSI(bars5m.map(b => b.close));
   const { highs, lows } = findPivots(bars5m, 3);
 
   if (direction === 'short') {
@@ -234,14 +211,14 @@ function checkDivergence(bars5m, direction) {
     const [h1, h2] = last2;
     const r1 = rsiArr[h1.index], r2 = rsiArr[h2.index];
     if (r1 == null || r2 == null) return false;
-    return h2.price > h1.price && r2 < r1;
+    return h2.price > h1.price && r2 < r1; // higher high, lower RSI = bear div
   } else {
     const last2 = lows.slice(-2);
     if (last2.length < 2) return false;
     const [l1, l2] = last2;
     const r1 = rsiArr[l1.index], r2 = rsiArr[l2.index];
     if (r1 == null || r2 == null) return false;
-    return l2.price < l1.price && r2 > r1;
+    return l2.price < l1.price && r2 > r1; // lower low, higher RSI = bull div
   }
 }
 
@@ -259,13 +236,13 @@ function checkGSLocation(bars1h, direction, currentPrice) {
   if (range <= 0) return null;
 
   if (direction === 'long') {
-    const retrace = (swingHigh - currentPrice) / range;
-    if (retrace >= 0.618 && retrace <= 0.786) return 'RLZ (0.618–0.786)';
-    if (retrace >= 0.382 && retrace <= 0.500) return 'PCZ (0.382–0.500)';
+    const r = (swingHigh - currentPrice) / range;
+    if (r >= 0.618 && r <= 0.786) return 'RLZ (0.618–0.786)';
+    if (r >= 0.382 && r <= 0.500) return 'PCZ (0.382–0.500)';
   } else {
-    const retrace = (currentPrice - swingLow) / range;
-    if (retrace >= 0.618 && retrace <= 0.786) return 'SRZ (0.618–0.786)';
-    if (retrace >= 0.382 && retrace <= 0.500) return 'DCZ (0.382–0.500)';
+    const r = (currentPrice - swingLow) / range;
+    if (r >= 0.618 && r <= 0.786) return 'SRZ (0.618–0.786)';
+    if (r >= 0.382 && r <= 0.500) return 'DCZ (0.382–0.500)';
   }
   return null;
 }
@@ -275,7 +252,7 @@ async function sendTelegram(text) {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
-    console.warn('[scanner] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — alert skipped');
+    console.warn('[scanner] TELEGRAM env vars not set — alert skipped');
     return;
   }
   try {
@@ -283,18 +260,18 @@ async function sendTelegram(text) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(8_000),
     });
     if (!res.ok) {
       const err = await res.text();
       console.error(`[scanner] Telegram error: ${err.slice(0, 200)}`);
     }
   } catch (err) {
-    console.error(`[scanner] Telegram send failed: ${err.message}`);
+    console.error(`[scanner] Telegram failed: ${err.message}`);
   }
 }
 
-function buildAlertMessage(symbol, direction, location, hasDivergence) {
+function buildAlert(symbol, direction, location, hasDivergence) {
   const coin  = symbol.replace('_', '');
   const time  = new Date().toISOString().slice(11, 16) + ' UTC';
   const dir   = direction === 'long' ? 'LONG' : 'SHORT';
@@ -306,52 +283,24 @@ function buildAlertMessage(symbol, direction, location, hasDivergence) {
     : `⚡ <b>SFP ONLY</b>\nCoin: ${coin}\nDirection: ${dir}\nLevel: ${level}${div}\nTime: ${time}`;
 }
 
-// ── Per-symbol analysis ───────────────────────────────────────────────────────
-/**
- * Fetches klines sequentially (5m, pause, 1H) then runs SFP + GS checks.
- * Returns true if it ran cleanly, throws if rate-limited.
- */
-async function scanSymbol(symbol) {
-  // ── 5m klines ──────────────────────────────────────────────────────────────
-  let bars5m;
+// ── SFP detection (runs on each 5m candle close) ──────────────────────────────
+async function detectSFP(symbol) {
   try {
-    bars5m = await fetchKlines(symbol, 'Min5', 100);
-  } catch (err) {
-    if (err.message === 'RATE_LIMIT_EXHAUSTED') throw err; // bubble up
-    if (!err.message.includes('HTTP 4')) {
-      console.error(`[scanner] ${symbol} 5m fetch: ${err.message}`);
-    }
-    return;
-  }
+    const buf = klineBuffers.get(symbol);
+    if (!buf) return;
 
-  await sleep(DELAY_BETWEEN_REQUESTS_MS); // 500ms between the two requests
+    const { m5, h1 } = buf;
+    if (m5.length < 30 || h1.length < 50) return;
 
-  // ── 1H klines ──────────────────────────────────────────────────────────────
-  let bars1h;
-  try {
-    bars1h = await fetchKlines(symbol, 'Min60', 500);
-  } catch (err) {
-    if (err.message === 'RATE_LIMIT_EXHAUSTED') throw err;
-    if (!err.message.includes('HTTP 4')) {
-      console.error(`[scanner] ${symbol} 1H fetch: ${err.message}`);
-    }
-    return;
-  }
-
-  // ── Analysis ────────────────────────────────────────────────────────────────
-  if (bars5m.length < 30 || bars1h.length < 50) return;
-
-  try {
     // PWH/PWL = highest high + lowest low of last 20 days on 1H (480 bars)
-    const refBars = bars1h.slice(-480);
+    const refBars = h1.slice(-480);
     const PWH     = Math.max(...refBars.map(b => b.high));
     const PWL     = Math.min(...refBars.map(b => b.low));
+    if (!isFinite(PWH) || !isFinite(PWL)) return;
 
-    if (!isFinite(PWH) || !isFinite(PWL)) return; // bad kline data — skip
-
-    // Second-to-last 5m bar = last fully closed candle
-    const sfpBar       = bars5m[bars5m.length - 2];
-    const currentPrice = bars5m[bars5m.length - 1].close;
+    // Most recent closed 5m bar = last bar in buffer
+    const sfpBar      = m5[m5.length - 1];
+    const currentPrice = sfpBar.close;
     if (!sfpBar) return;
 
     const isLongSFP  = sfpBar.low  < PWL && sfpBar.close > PWL;
@@ -363,124 +312,225 @@ async function scanSymbol(symbol) {
       if (direction === 'short' && !isShortSFP) continue;
       if (wasAlertedRecently(symbol, direction)) continue;
 
-      const hasDivergence = checkDivergence(bars5m, direction);
-      const location      = checkGSLocation(bars1h, direction, currentPrice);
+      const hasDivergence = checkDivergence(m5, direction);
+      const location      = checkGSLocation(h1, direction, currentPrice);
 
       console.log(
         `[scanner] ★ SIGNAL ${symbol} ${direction.toUpperCase()} | ` +
         `location=${location || 'none'} | div=${hasDivergence} | ` +
         `PWH=${PWH.toFixed(4)} PWL=${PWL.toFixed(4)} | ` +
-        `sfp.high=${sfpBar.high} sfp.low=${sfpBar.low} sfp.close=${sfpBar.close}`
+        `bar: H=${sfpBar.high} L=${sfpBar.low} C=${sfpBar.close}`
       );
 
-      await sendTelegram(buildAlertMessage(symbol, direction, location, hasDivergence));
+      await sendTelegram(buildAlert(symbol, direction, location, hasDivergence));
       markAlerted(symbol, direction);
     }
   } catch (err) {
-    console.error(`[scanner] ${symbol} analysis error: ${err.message}`);
+    console.error(`[scanner] detectSFP ${symbol}: ${err.message}`);
   }
 }
 
-// ── Full scan cycle ───────────────────────────────────────────────────────────
-async function scanAll() {
-  if (isScanning) {
-    console.log('[scanner] Previous scan still running — skipping this tick');
-    return;
+// ── WebSocket send helper ─────────────────────────────────────────────────────
+function wsSend(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
   }
+}
 
-  if (Date.now() < rateLimitedUntil) {
-    const resumeIn = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
-    console.log(`[scanner] Rate-limit pause active — resuming in ${resumeIn}s`);
-    return;
-  }
-
-  isScanning = true;
-  const startTime = Date.now();
-  console.log(`[scanner] ── Scan started ${new Date(startTime).toISOString()} ──`);
-
-  // Reset req/min tracker at scan start
-  reqCount       = 0;
-  reqWindowStart = Date.now();
-  const rpmTimer = setInterval(logRPM, 60_000);
-
-  let symbols;
-  try {
-    symbols = await fetchAllSymbols(); // includes 5s sleep + volume filter internally
-    console.log(`[scanner] ${symbols.length} coins queued | ETA: ~${Math.ceil(symbols.length * 2 / 60)}min`);
-  } catch (err) {
-    console.error(`[scanner] fetchAllSymbols failed: ${err.message}`);
-    clearInterval(rpmTimer);
-    isScanning = false;
-    return;
-  }
-
-  let processed = 0;
-  let errCount  = 0;
-
+// ── Subscribe / unsubscribe klines ────────────────────────────────────────────
+function subscribeSymbols(symbols) {
   for (const symbol of symbols) {
-    // Re-check rate limit pause inside the loop in case it was set mid-scan
-    if (Date.now() < rateLimitedUntil) {
-      const resumeIn = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
-      console.warn(`[scanner] Rate limit triggered mid-scan — stopping scan, resuming in ${resumeIn}s`);
-      break;
-    }
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'  } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60' } });
+  }
+  console.log(`[scanner] Subscribed klines for ${symbols.length} coins (5m + 1H)`);
+}
 
-    try {
-      await scanSymbol(symbol);
-      processed++;
-    } catch (err) {
-      if (err.message === 'RATE_LIMIT_EXHAUSTED') {
-        console.error('[scanner] Rate limit exhausted — aborting scan');
-        break;
-      }
-      errCount++;
-      console.error(`[scanner] ${symbol}: ${err.message}`);
-    }
+function unsubscribeSymbols(symbols) {
+  for (const symbol of symbols) {
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'  } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60' } });
+  }
+}
 
-    // 1500ms pause between coins (+ 500ms already spent between requests = ~2s per coin)
-    await sleep(DELAY_BETWEEN_COINS_MS);
+// ── Incoming WS message handler ───────────────────────────────────────────────
+function handleMessage(raw) {
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return;
   }
 
-  clearInterval(rpmTimer);
-  logRPM(); // final rpm log
+  const { channel, symbol, data } = msg;
 
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`[scanner] ── Scan complete: ${processed}/${symbols.length} coins in ${elapsed}s | errors: ${errCount} ──`);
+  if (channel === 'pong') return; // heartbeat ACK
 
-  isScanning = false;
+  if (channel === 'push.kline') {
+    if (!symbol || !data) return;
+
+    const interval = data.interval;
+    if (interval !== 'Min5' && interval !== 'Min60') return;
+
+    const t   = data.t;   // candle open timestamp (seconds)
+    const key = `${symbol}:${interval}`;
+    const lastT = lastWsTs.get(key);
+
+    // ── Candle close detected: timestamp changed ──────────────────────────────
+    // When a NEW candle opens (t !== lastT), the PREVIOUS candle is finalized.
+    // We use the last WS data received for that previous candle timestamp.
+    if (lastT !== undefined && t !== lastT) {
+      const prev = pendingBar.get(key);
+      if (prev) {
+        const closedBar = {
+          time:  lastT,
+          open:  parseFloat(prev.o),
+          high:  parseFloat(prev.h),
+          low:   parseFloat(prev.l),
+          close: parseFloat(prev.c),
+          vol:   parseFloat(prev.v || 0),
+        };
+
+        if (isFinite(closedBar.close) && closedBar.close > 0) {
+          pushBarToBuffer(symbol, interval, closedBar);
+
+          if (interval === 'Min5') {
+            detectSFP(symbol).catch(err =>
+              console.error(`[scanner] detectSFP ${symbol}: ${err.message}`)
+            );
+          }
+        }
+      }
+    }
+
+    // Store forming candle data and current timestamp
+    pendingBar.set(key, data);
+    lastWsTs.set(key, t);
+  }
+}
+
+// ── WebSocket connection ──────────────────────────────────────────────────────
+function connect() {
+  if (shuttingDown) return;
+  console.log(`[scanner] Connecting WebSocket → ${WS_URL}`);
+
+  ws = new WebSocket(WS_URL);
+
+  ws.on('open', () => {
+    console.log('[scanner] WebSocket connected');
+    reconnectDelay = RECONNECT_BASE_MS; // reset backoff on successful connect
+
+    // Start ping timer
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+      wsSend({ method: 'ping' });
+    }, PING_INTERVAL_MS);
+
+    // Re-subscribe to all current top symbols
+    subscribeSymbols(topSymbols);
+  });
+
+  ws.on('message', (raw) => {
+    try {
+      handleMessage(raw.toString());
+    } catch (err) {
+      console.error('[scanner] handleMessage error:', err.message);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    clearInterval(pingTimer);
+    disconnectedAt = Date.now();
+    if (!shuttingDown) {
+      console.warn(`[scanner] WebSocket closed (${code}). Reconnecting in ${reconnectDelay / 1000}s...`);
+      scheduleReconnect();
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[scanner] WebSocket error: ${err.message}`);
+    // 'close' event fires after 'error', so reconnect is handled there
+  });
+}
+
+function scheduleReconnect() {
+  if (shuttingDown) return;
+  setTimeout(async () => {
+    const downtime = Date.now() - disconnectedAt;
+
+    // If disconnected > 10 min, re-bootstrap kline history to fill the gap
+    if (downtime > 10 * 60 * 1000) {
+      console.log(`[scanner] Disconnected for ${Math.round(downtime / 60000)}min — re-bootstrapping klines`);
+      try {
+        await bootstrapKlines(topSymbols);
+      } catch (err) {
+        console.error(`[scanner] Re-bootstrap failed: ${err.message}`);
+      }
+    }
+
+    connect();
+
+    // Increase backoff for next failure (exponential, capped at max)
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+  }, reconnectDelay);
+}
+
+// ── Top-50 volume refresh (every 6h) ─────────────────────────────────────────
+async function refreshTopSymbols() {
+  try {
+    const newTop = await fetchTopSymbols();
+
+    const added   = newTop.filter(s => !topSymbols.includes(s));
+    const removed = topSymbols.filter(s => !newTop.includes(s));
+
+    if (added.length || removed.length) {
+      console.log(`[scanner] Top-50 refresh: +${added.length} added, -${removed.length} removed`);
+
+      // Unsubscribe dropped coins
+      if (removed.length) unsubscribeSymbols(removed);
+
+      // Bootstrap + subscribe new coins
+      if (added.length) {
+        await bootstrapKlines(added);
+        subscribeSymbols(added);
+      }
+
+      topSymbols = newTop;
+    } else {
+      console.log('[scanner] Top-50 refresh: no changes');
+    }
+  } catch (err) {
+    console.error(`[scanner] refreshTopSymbols failed: ${err.message}`);
+  }
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
-export function startScanner() {
-  console.log('[scanner] SFP scanner armed');
-  console.log('[scanner] Rate limit design: sequential | ~0.7 req/s | 50% of 10 req/s max');
-  console.log('[scanner] Dedup window: 4h | Rate limit pause: 10min | Scan cooldown: 5min');
+export async function startScanner() {
+  console.log('[scanner] ── WebSocket SFP Scanner starting ──');
+  console.log('[scanner] Architecture: 1 WS connection | REST for bootstrap only | 0 REST polling');
 
-  // Catch unhandled rejections at process level — prevents Node from crashing
-  // on any unexpected async error that escapes our per-function try-catch blocks.
+  // Safety net for any unexpected async errors
   process.on('unhandledRejection', (reason) => {
-    console.error('[scanner] Unhandled rejection (caught at process level):', reason);
-    // Do NOT exit — log and continue. Railway keeps the process alive.
+    console.error('[scanner] Unhandled rejection:', reason);
   });
   process.on('uncaughtException', (err) => {
-    console.error('[scanner] Uncaught exception (caught at process level):', err.message);
-    // Do NOT exit — log and continue.
+    console.error('[scanner] Uncaught exception:', err.message);
   });
 
-  // Use setTimeout chain so scans NEVER overlap regardless of how long they take.
-  // .catch() on scheduleNext() prevents an unhandled rejection from crashing Node.
-  async function scheduleNext() {
-    try {
-      await scanAll();
-    } catch (err) {
-      // scanAll() has comprehensive try-catch internally, but this is the final safety net.
-      console.error('[scanner] Unexpected error in scanAll (caught in scheduleNext):', err.message);
-      isScanning = false; // ensure we don't get stuck
-    }
-    setTimeout(scheduleNext, SCAN_COOLDOWN_MS);
+  // ── Step 1: Bootstrap via REST ────────────────────────────────────────────
+  try {
+    topSymbols = await fetchTopSymbols();
+    await bootstrapKlines(topSymbols);
+  } catch (err) {
+    console.error('[scanner] Bootstrap failed — scanner will retry on WS reconnect:', err.message);
+    topSymbols = topSymbols.length ? topSymbols : []; // keep whatever we had
   }
 
-  scheduleNext().catch(err => {
-    console.error('[scanner] scheduleNext() rejected unexpectedly:', err.message);
-  });
+  // ── Step 2: Open WebSocket connection ─────────────────────────────────────
+  connect();
+
+  // ── Step 3: Schedule 6h top-50 refresh ────────────────────────────────────
+  setInterval(refreshTopSymbols, VOLUME_REFRESH_MS);
+
+  console.log('[scanner] Scanner armed — listening for candle closes via WebSocket');
 }
