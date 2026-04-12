@@ -20,6 +20,7 @@
 import express from 'express';
 import cors from 'cors';
 import { placeOrder, getBalance } from './mexc.js';
+import { startScanner } from './scanner.js';
 
 const app = express();
 app.use(cors());
@@ -101,4 +102,5 @@ app.post('/webhook', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Webhook server listening on port ${PORT}`);
   console.log(`POST http://localhost:${PORT}/webhook`);
+  startScanner();
 });
