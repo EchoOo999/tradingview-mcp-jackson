@@ -25,7 +25,7 @@ const TELEGRAM_API      = 'https://api.telegram.org';
 const PING_INTERVAL_MS  = 15_000;              // server drops conn after 60s no-ping
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS  = 60_000;
-const VOLUME_REFRESH_MS = 6 * 60 * 60 * 1000; // 6h between top-50 refreshes
+const VOLUME_REFRESH_MS = 60 * 60 * 1000;      // 1h between top-coin refreshes
 const ALERT_RESET_MS    = 4 * 60 * 60 * 1000; // 4h dedup window
 
 const TOP_N             = 250;                 // raised — 5M filter is the real gate
