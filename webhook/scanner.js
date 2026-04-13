@@ -59,6 +59,9 @@ let topSymbols     = [];
 // Alert dedup: "SYMBOL:long" | "SYMBOL:short" → timestamp
 const alerted      = new Map();
 
+// Activity counters
+let candleCloseCount = 0;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -299,9 +302,9 @@ async function detectSFP(symbol) {
     if (!isFinite(PWH) || !isFinite(PWL)) return;
 
     // Most recent closed 5m bar = last bar in buffer
-    const sfpBar      = m5[m5.length - 1];
-    const currentPrice = sfpBar.close;
+    const sfpBar = m5[m5.length - 1];
     if (!sfpBar) return;
+    const currentPrice = sfpBar.close;
 
     const isLongSFP  = sfpBar.low  < PWL && sfpBar.close > PWL;
     const isShortSFP = sfpBar.high > PWH && sfpBar.close < PWH;
@@ -395,6 +398,10 @@ function handleMessage(raw) {
           pushBarToBuffer(symbol, interval, closedBar);
 
           if (interval === 'Min5') {
+            candleCloseCount++;
+            if (candleCloseCount % 100 === 0) {
+              console.log(`[scanner] ✓ ${candleCloseCount} candle closes processed (latest: ${symbol})`);
+            }
             detectSFP(symbol).catch(err =>
               console.error(`[scanner] detectSFP ${symbol}: ${err.message}`)
             );

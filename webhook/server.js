@@ -39,6 +39,33 @@ if (!API_KEY || !API_SECRET) {
 // Health check
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'mexc-webhook' }));
 
+// Test Telegram connectivity
+app.get('/test-telegram', async (req, res) => {
+  const token  = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    return res.status(500).json({ success: false, error: 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set' });
+  }
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: '🧪 Test alert - scanner is alive', parse_mode: 'HTML' }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error(`[test-telegram] Telegram API error: ${errText.slice(0, 300)}`);
+      return res.status(500).json({ success: false, error: errText.slice(0, 300) });
+    }
+    console.log('[test-telegram] Test message sent OK');
+    return res.json({ success: true, message: 'Telegram test sent' });
+  } catch (err) {
+    console.error(`[test-telegram] fetch failed: ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Wallet balance
 app.get('/balance', async (req, res) => {
   try {
