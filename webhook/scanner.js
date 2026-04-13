@@ -98,12 +98,11 @@ function parseKlines(d, excludeLast = true) {
 }
 
 // ── Key level computation ─────────────────────────────────────────────────────
-// W pattern (LONG) only fires at support levels — levels that sit BELOW price.
-// M pattern (SHORT) only fires at resistance levels — levels that sit ABOVE price.
-// weeklyOpen / dailyOpen are direction-agnostic open prices; the W/M detector's
-// own close-vs-level check already enforces which side they act as.
-const LONG_LEVELS  = ['PML', 'PWL', 'mondayLow',  'weeklyOpen', 'dailyOpen'];
-const SHORT_LEVELS = ['PMH', 'PWH', 'mondayHigh', 'weeklyOpen', 'dailyOpen'];
+// W pattern (LONG)  only fires at support levels (below price).
+// M pattern (SHORT) only fires at resistance levels (above price).
+// Session levels are computed live from the H1 buffer — not stored in levelCache.
+const LONG_LEVELS  = ['PML', 'PWL', 'mondayLow',  'weeklyOpen', 'londonLow',  'asiaLow'];
+const SHORT_LEVELS = ['PMH', 'PWH', 'mondayHigh', 'weeklyOpen', 'londonHigh', 'asiaHigh'];
 
 const LEVEL_DISPLAY = {
   PWH:        'PWH',
@@ -113,20 +112,21 @@ const LEVEL_DISPLAY = {
   mondayHigh: 'Monday High',
   mondayLow:  'Monday Low',
   weeklyOpen: 'Weekly Open',
-  dailyOpen:  'Daily Open',
+  asiaHigh:   'Asia High',
+  asiaLow:    'Asia Low',
+  londonHigh: 'London High',
+  londonLow:  'London Low',
 };
 
-function computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp) {
-  const lastWeek   = w1Comp.at(-1)  ?? null;   // last COMPLETED week bar
-  const lastMonth  = moComp.at(-1)  ?? null;   // last COMPLETED month bar
+function computeLevels(d1Comp, w1Comp, w1Forming, moComp) {
+  const lastWeek   = w1Comp.at(-1) ?? null;   // last COMPLETED week bar
+  const lastMonth  = moComp.at(-1) ?? null;   // last COMPLETED month bar
 
-  // Find the most recent Monday whose ENTIRE day has closed.
-  // A Monday bar starts at b.time (UTC 00:00) and closes at b.time + 86400.
-  // If b.time + 86400 is still in the future we're still inside that Monday = skip it.
+  // Monday bar valid only when its full 24h window has passed.
   const nowSec     = Date.now() / 1000;
   const mondays    = d1Comp.filter(b =>
     new Date(b.time * 1000).getUTCDay() === 1 &&
-    (b.time + 86400) < nowSec            // entire 24h window has passed
+    (b.time + 86400) < nowSec
   );
   const lastMonday = mondays.at(-1) ?? null;
 
@@ -137,8 +137,7 @@ function computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp) {
     PML:        lastMonth?.low   ?? null,
     mondayHigh: lastMonday?.high ?? null,
     mondayLow:  lastMonday?.low  ?? null,
-    weeklyOpen: (new Date().getUTCDay() !== 1 ? w1Forming?.open : null) ?? null, // invalid on Mondays
-    dailyOpen:  d1Forming?.open  ?? null,   // current (forming) day open
+    weeklyOpen: (new Date().getUTCDay() !== 1 ? w1Forming?.open : null) ?? null,
   };
 }
 
@@ -183,14 +182,12 @@ async function bootstrapKlines(symbols) {
         h1: parseKlines(raw1h),
       });
 
-      // Completed bars (exclude forming) + the forming bar's open for daily/weekly open levels
       const d1Comp    = parseKlines(rawD1, true);
-      const d1Forming = parseKlines(rawD1, false).at(-1) ?? null;
       const w1Comp    = parseKlines(rawW1, true);
       const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
       const moComp    = parseKlines(rawMo, true);
 
-      levelCache.set(symbol, computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp));
+      levelCache.set(symbol, computeLevels(d1Comp, w1Comp, w1Forming, moComp));
       ok++;
     } catch (err) {
       console.error(`[scanner] Bootstrap ${symbol}: ${err.message}`);
@@ -214,11 +211,10 @@ async function refreshLevels() {
         restGet(`/api/v1/contract/kline/${symbol}?interval=Month1&limit=${BOOTSTRAP_MO}`),
       ]);
       const d1Comp    = parseKlines(rawD1, true);
-      const d1Forming = parseKlines(rawD1, false).at(-1) ?? null;
       const w1Comp    = parseKlines(rawW1, true);
       const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
       const moComp    = parseKlines(rawMo, true);
-      levelCache.set(symbol, computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp));
+      levelCache.set(symbol, computeLevels(d1Comp, w1Comp, w1Forming, moComp));
       ok++;
     } catch (err) {
       console.error(`[scanner] Level refresh ${symbol}: ${err.message}`);
@@ -512,6 +508,33 @@ async function sendTelegram(text) {
   }
 }
 
+// ── Session level computation (derived live from H1 buffer) ──────────────────
+// H1 buffer holds 550 bars (~23 days) — always enough to cover today's sessions.
+// Asia   session: 00:00–08:00 UTC — valid as a level only AFTER 08:00 UTC
+// London session: 08:00–16:00 UTC — valid as a level only AFTER 16:00 UTC
+function computeSessionLevels(h1Bars) {
+  const now  = new Date();
+  const nowH = now.getUTCHours();
+  const todayMidnight = Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()
+  ) / 1000;
+
+  const asiaStart   = todayMidnight;
+  const asiaEnd     = todayMidnight + 8  * 3600;
+  const londonStart = asiaEnd;
+  const londonEnd   = todayMidnight + 16 * 3600;
+
+  const asiaBars   = h1Bars.filter(b => b.time >= asiaStart   && b.time < asiaEnd);
+  const londonBars = h1Bars.filter(b => b.time >= londonStart && b.time < londonEnd);
+
+  return {
+    asiaHigh:   (nowH >= 8  && asiaBars.length   > 0) ? Math.max(...asiaBars.map(b => b.high))   : null,
+    asiaLow:    (nowH >= 8  && asiaBars.length   > 0) ? Math.min(...asiaBars.map(b => b.low))    : null,
+    londonHigh: (nowH >= 16 && londonBars.length > 0) ? Math.max(...londonBars.map(b => b.high)) : null,
+    londonLow:  (nowH >= 16 && londonBars.length > 0) ? Math.min(...londonBars.map(b => b.low))  : null,
+  };
+}
+
 // ── Signal detection (runs on each 5m candle close) ───────────────────────────
 async function detectSFP(symbol) {
   try {
@@ -520,8 +543,10 @@ async function detectSFP(symbol) {
     const { m5, h1 } = buf;
     if (m5.length < 30 || h1.length < 50) return;
 
-    const levels = levelCache.get(symbol);
-    if (!levels || !Object.values(levels).some(v => v != null)) return;
+    const cached = levelCache.get(symbol);
+    if (!cached || !Object.values(cached).some(v => v != null)) return;
+    // Merge static cached levels with live session levels
+    const levels = { ...cached, ...computeSessionLevels(h1) };
 
     for (const direction of ['long', 'short']) {
       if (wasAlertedRecently(symbol, direction)) continue;
