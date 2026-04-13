@@ -98,8 +98,12 @@ function parseKlines(d, excludeLast = true) {
 }
 
 // ── Key level computation ─────────────────────────────────────────────────────
-// Priority order for level matching (highest priority first)
-const LEVEL_PRIORITY = ['PML', 'PMH', 'PWL', 'PWH', 'mondayLow', 'mondayHigh', 'weeklyOpen', 'dailyOpen'];
+// W pattern (LONG) only fires at support levels — levels that sit BELOW price.
+// M pattern (SHORT) only fires at resistance levels — levels that sit ABOVE price.
+// weeklyOpen / dailyOpen are direction-agnostic open prices; the W/M detector's
+// own close-vs-level check already enforces which side they act as.
+const LONG_LEVELS  = ['PML', 'PWL', 'mondayLow',  'weeklyOpen', 'dailyOpen'];
+const SHORT_LEVELS = ['PMH', 'PWH', 'mondayHigh', 'weeklyOpen', 'dailyOpen'];
 
 const LEVEL_DISPLAY = {
   PWH:        'PWH',
@@ -283,7 +287,8 @@ function detectMPattern(bars5m, level) {
 
 // Returns highest-priority level that was swept, or null.
 function findSweepLevel(bars5m, levels, direction) {
-  for (const key of LEVEL_PRIORITY) {
+  const keys = direction === 'long' ? LONG_LEVELS : SHORT_LEVELS;
+  for (const key of keys) {
     const price = levels[key];
     if (price == null || !isFinite(price) || price <= 0) continue;
     if (direction === 'long'  && detectWPattern(bars5m, price)) return { key, price };
@@ -471,13 +476,12 @@ function buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, has
   const coin     = symbol.replace('_USDT', 'USDT');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
   const dirEmoji = direction === 'long' ? '🟢' : '🔴';
-  const stars    = '⭐'.repeat(rank) + '☆'.repeat(16 - rank);
   const time     = new Date().toISOString().slice(11, 16) + ' UTC';
   const swept    = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
   const locStr   = hasLocation ? `${locZone} ✅` : '❌';
 
   return [
-    `${dirEmoji} <b>${coin} ${dir} ${rank}/16 ${stars}</b>`,
+    `${dirEmoji} <b>${coin} ${dir} ${rank}/16</b>`,
     `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${swept}`,
     `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
