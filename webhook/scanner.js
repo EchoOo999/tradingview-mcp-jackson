@@ -116,8 +116,14 @@ function computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp) {
   const lastWeek   = w1Comp.at(-1)  ?? null;   // last COMPLETED week bar
   const lastMonth  = moComp.at(-1)  ?? null;   // last COMPLETED month bar
 
-  // Find the most recent Monday in completed daily bars
-  const mondays    = d1Comp.filter(b => new Date(b.time * 1000).getUTCDay() === 1);
+  // Find the most recent Monday whose ENTIRE day has closed.
+  // A Monday bar starts at b.time (UTC 00:00) and closes at b.time + 86400.
+  // If b.time + 86400 is still in the future we're still inside that Monday = skip it.
+  const nowSec     = Date.now() / 1000;
+  const mondays    = d1Comp.filter(b =>
+    new Date(b.time * 1000).getUTCDay() === 1 &&
+    (b.time + 86400) < nowSec            // entire 24h window has passed
+  );
   const lastMonday = mondays.at(-1) ?? null;
 
   return {
@@ -317,9 +323,19 @@ function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
   return macdLine.map((v, i) => v - signalLine[i]);
 }
 
-// ── Generic divergence (price pivots vs indicator values, lookback 5) ──────────
-// Bull: price makes lower low, indicator makes higher low
-// Bear: price makes higher high, indicator makes lower high
+// ── Generic divergence with neckline confirmation (lookback 5) ────────────────
+//
+// Bull (long):
+//   1. Find 2 price swing lows: low2 < low1 (lower low)
+//   2. Indicator at low2 > indicator at low1 (higher low = potential div)
+//   3. Neckline = highest indicator value between low1 and low2
+//   4. CONFIRMED only when current indicator > neckline (neckline break)
+//
+// Bear (short):
+//   1. Find 2 price swing highs: high2 > high1 (higher high)
+//   2. Indicator at high2 < indicator at high1 (lower high = potential div)
+//   3. Neckline = lowest indicator value between high1 and high2
+//   4. CONFIRMED only when current indicator < neckline (neckline break)
 function checkDivergence(closes, indicatorValues, direction) {
   const lookback = 5;
   const highs = [], lows = [];
@@ -334,18 +350,31 @@ function checkDivergence(closes, indicatorValues, direction) {
     if (isL)  lows.push(i);
   }
 
+  const currentInd = indicatorValues.at(-1);
+  if (!isFinite(currentInd)) return false;
+
   if (direction === 'short') {
     const [i1, i2] = highs.slice(-2);
     if (i1 == null || i2 == null) return false;
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
-    return closes[i2] > closes[i1] && v2 < v1;   // HH price, LH indicator = bearish div
+    if (!(closes[i2] > closes[i1] && v2 < v1)) return false;   // HH price, LH indicator
+    // Neckline = lowest indicator value between the two swing highs
+    const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
+    if (!between.length) return false;
+    const neckline = Math.min(...between);
+    return currentInd < neckline;   // confirmed: current breaks below neckline
   } else {
     const [i1, i2] = lows.slice(-2);
     if (i1 == null || i2 == null) return false;
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
-    return closes[i2] < closes[i1] && v2 > v1;   // LL price, HL indicator = bullish div
+    if (!(closes[i2] < closes[i1] && v2 > v1)) return false;   // LL price, HL indicator
+    // Neckline = highest indicator value between the two swing lows
+    const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
+    if (!between.length) return false;
+    const neckline = Math.max(...between);
+    return currentInd > neckline;   // confirmed: current breaks above neckline
   }
 }
 
@@ -408,27 +437,20 @@ function calcRank(hasLocation, hasOBV, hasRSI, hasMACD) {
   return 1 + ((hasLocation ? 8 : 0) | (hasOBV ? 4 : 0) | (hasRSI ? 2 : 0) | (hasMACD ? 1 : 0));
 }
 
-function rankEmoji(rank) {
-  if (rank <= 4)  return '⚡';
-  if (rank <= 8)  return '🎯';
-  if (rank <= 12) return '🔥';
-  if (rank <= 15) return '💎';
-  return '💎💎';
-}
-
 // ── Alert builder ─────────────────────────────────────────────────────────────
 function buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
-  const coin  = symbol.replace('_USDT', 'USDT');
-  const dir   = direction === 'long' ? 'LONG' : 'SHORT';
-  const emoji = rankEmoji(rank);
-  const time  = new Date().toISOString().slice(11, 16) + ' UTC';
-  const swept = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
-  const locStr = hasLocation ? `${locZone} ✅` : '❌';
+  const coin     = symbol.replace('_USDT', 'USDT');
+  const dir      = direction === 'long' ? 'LONG' : 'SHORT';
+  const dirEmoji = direction === 'long' ? '🟢' : '🔴';
+  const stars    = '⭐'.repeat(rank) + '☆'.repeat(16 - rank);
+  const time     = new Date().toISOString().slice(11, 16) + ' UTC';
+  const swept    = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
+  const locStr   = hasLocation ? `${locZone} ✅` : '❌';
 
   return [
-    `${emoji} <b>${coin} ${dir} ${rank}/16</b>`,
+    `${dirEmoji} <b>${coin} ${dir} ${rank}/16 ${stars}</b>`,
     `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${swept}`,
-    `Location: ${locStr} | OBV: ${hasOBV ? '✅' : '❌'} | RSI: ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'}`,
+    `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
   ].join('\n');
 }
