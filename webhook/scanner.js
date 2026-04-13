@@ -569,6 +569,11 @@ async function detectSFP(symbol) {
 
       const rank = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
 
+      if (rank < 2) {
+        console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
+        continue;
+      }
+
       console.log(
         `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
         `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
