@@ -362,7 +362,7 @@ function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
   return macdLine.map((v, i) => v - signalLine[i]);
 }
 
-// ── Generic divergence with neckline confirmation (lookback 5) ────────────────
+// ── Generic divergence with neckline confirmation ─────────────────────────────
 //
 // Bull (long):
 //   1. Find 2 price swing lows: low2 < low1 (lower low)
@@ -375,18 +375,30 @@ function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
 //   2. Indicator at high2 < indicator at high1 (lower high = potential div)
 //   3. Neckline = lowest indicator value between high1 and high2
 //   4. CONFIRMED only when current indicator < neckline (neckline break)
-// minDiffRatio: optional minimum relative difference between the two pivot indicator
-// values — guards against near-identical values being counted as divergence.
-// Pass 0.005 (0.5%) for OBV; leave 0 for RSI and MACD.
+//
+// Pivot search window: 20–60 bars ago (100 min – 5 h on 5m) to avoid
+//   micro-pivots that are too recent AND stale pivots that no longer matter.
+// Pivot confirmation wing: 5 bars on each side must be a local extreme.
+// minDiffRatio: minimum relative indicator difference (pass 0.005 for OBV).
 function checkDivergence(closes, indicatorValues, direction, minDiffRatio = 0) {
-  const lookback = 5;
+  const WING        = 5;   // bars on each side to confirm pivot is a local extreme
+  const MIN_AGO     = 20;  // pivot must be ≥ 20 bars ago (100 min) — no micro-pivots
+  const MAX_AGO     = 60;  // pivot must be ≤ 60 bars ago (5 h)   — no stale pivots
+
+  const n           = closes.length;
+  const searchStart = Math.max(WING, n - MAX_AGO);
+  const searchEnd   = n - MIN_AGO;  // exclusive; ensures pivot is ≥ MIN_AGO bars back
+
+  if (searchEnd <= searchStart) return false;
+
   const highs = [], lows = [];
-  for (let i = lookback; i < closes.length - lookback; i++) {
+  for (let i = searchStart; i < searchEnd; i++) {
     let isH = true, isL = true;
-    for (let j = i - lookback; j <= i + lookback; j++) {
-      if (j === i) continue;
+    for (let j = i - WING; j <= i + WING; j++) {
+      if (j < 0 || j >= n || j === i) continue;
       if (closes[j] >= closes[i]) isH = false;
       if (closes[j] <= closes[i]) isL = false;
+      if (!isH && !isL) break;
     }
     if (isH) highs.push(i);
     if (isL)  lows.push(i);
@@ -662,8 +674,8 @@ function buildSFUAlert(symbol, direction, sfuLevel, hasLocation, locZone, hasOBV
   const locStr   = hasLocation ? `${locZone} ✅` : '❌';
 
   return [
-    `${dirEmoji} <b>${coin} ${dir} — SFU</b>`,
-    `SFU: ${levelStr} (${sfuLevel.toPrecision(6)}) swept (2-bar close-back)`,
+    `${dirEmoji} <b>${coin} ${dir} 🚀SFU</b>`,
+    `Level: ${levelStr} swept (2-candle confirmed)`,
     `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
   ].join('\n');
@@ -680,9 +692,9 @@ function buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZon
   const locStr   = hasLocation ? `${locZone} ✅` : '❌';
 
   return [
-    `${dirEmoji} <b>${coin} ${dir} ${rank}/16 + SFU</b>`,
+    `${dirEmoji} <b>${coin} ${dir} ${rank}/16 🚀SFU</b>`,
     `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${sfpStr}`,
-    `SFU: ${sfuStr} (${sfuLevel.toPrecision(6)}) also confirmed`,
+    `SFU: ${sfuStr} also swept ✅`,
     `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
   ].join('\n');
