@@ -29,18 +29,21 @@ const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS  = 60_000;
 const VOLUME_REFRESH_MS = 60 * 60 * 1000;      // 1h
 const LEVEL_REFRESH_MS  = 60 * 60 * 1000;      // 1h (staggered 30min after volume)
-const ALERT_RESET_MS    = 4 * 60 * 60 * 1000;  // 4h dedup window
+const ALERT_RESET_MS     = 4 * 60 * 60 * 1000;  // 4h dedup window (SFP)
+const ALERT_RESET_SFU_MS = 8 * 60 * 60 * 1000;  // 8h dedup window (SFU)
 
 const TOP_N           = 250;
 const MIN_VOLUME_USDT = 5_000_000;              // 5M USDT 24h
 
 const BOOTSTRAP_5M  = 100;
 const BOOTSTRAP_1H  = 500;   // ~20 days of 1H bars
+const BOOTSTRAP_4H  = 100;   // ~16 days of 4H bars
 const BOOTSTRAP_D1  = 14;    // 14 daily bars — enough to find last Monday
 const BOOTSTRAP_W1  = 4;     // 3 completed weeks + forming
 const BOOTSTRAP_MO  = 4;     // 3 completed months + forming
 const BUFFER_MAX_5M = 150;
 const BUFFER_MAX_1H = 550;
+const BUFFER_MAX_4H = 110;
 
 // ── State ──────────────────────────────────────────────────────────────────────
 let ws             = null;
@@ -56,6 +59,7 @@ const lastWsTs     = new Map();   // "SYMBOL:Min5" → epochSeconds
 const pendingBar   = new Map();   // "SYMBOL:Min5" → forming bar data from WS
 let   topSymbols   = [];
 const alerted      = new Map();   // "SYMBOL:long" | "SYMBOL:short" → timestamp
+const alertedSFU   = new Map();   // "SYMBOL:long" | "SYMBOL:short" → timestamp (SFU dedup)
 
 let candleCloseCount = 0;
 
@@ -68,6 +72,13 @@ function wasAlertedRecently(symbol, direction) {
 }
 function markAlerted(symbol, direction) {
   alerted.set(`${symbol}:${direction}`, Date.now());
+}
+function wasAlertedSFURecently(symbol, direction) {
+  const ts = alertedSFU.get(`${symbol}:${direction}`);
+  return ts != null && Date.now() - ts < ALERT_RESET_SFU_MS;
+}
+function markAlertedSFU(symbol, direction) {
+  alertedSFU.set(`${symbol}:${direction}`, Date.now());
 }
 
 // ── REST ───────────────────────────────────────────────────────────────────────
@@ -169,9 +180,10 @@ async function bootstrapKlines(symbols) {
   let ok = 0;
   for (const symbol of symbols) {
     try {
-      const [raw5m, raw1h, rawD1, rawW1, rawMo] = await Promise.all([
+      const [raw5m, raw1h, raw4h, rawD1, rawW1, rawMo] = await Promise.all([
         restGet(`/api/v1/contract/kline/${symbol}?interval=Min5&limit=${BOOTSTRAP_5M}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Min60&limit=${BOOTSTRAP_1H}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Min240&limit=${BOOTSTRAP_4H}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Day1&limit=${BOOTSTRAP_D1}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Week1&limit=${BOOTSTRAP_W1}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Month1&limit=${BOOTSTRAP_MO}`),
@@ -180,6 +192,7 @@ async function bootstrapKlines(symbols) {
       klineBuffers.set(symbol, {
         m5: parseKlines(raw5m),
         h1: parseKlines(raw1h),
+        h4: parseKlines(raw4h),
       });
 
       const d1Comp    = parseKlines(rawD1, true);
@@ -191,7 +204,7 @@ async function bootstrapKlines(symbols) {
       ok++;
     } catch (err) {
       console.error(`[scanner] Bootstrap ${symbol}: ${err.message}`);
-      klineBuffers.set(symbol, { m5: [], h1: [] });
+      klineBuffers.set(symbol, { m5: [], h1: [], h4: [] });
       levelCache.set(symbol, {});
     }
     await sleep(400);   // ~2.5 symbols/s — safely under MEXC 20 req/s limit
@@ -228,8 +241,12 @@ async function refreshLevels() {
 function pushBarToBuffer(symbol, interval, bar) {
   const buf = klineBuffers.get(symbol);
   if (!buf) return;
-  const arr = interval === 'Min5' ? buf.m5 : buf.h1;
-  const max = interval === 'Min5' ? BUFFER_MAX_5M : BUFFER_MAX_1H;
+  let arr, max;
+  if      (interval === 'Min5')   { arr = buf.m5; max = BUFFER_MAX_5M; }
+  else if (interval === 'Min60')  { arr = buf.h1; max = BUFFER_MAX_1H; }
+  else if (interval === 'Min240') { arr = buf.h4; max = BUFFER_MAX_4H; }
+  else return;
+  if (!arr) return;
   arr.push(bar);
   if (arr.length > max) arr.shift();
 }
@@ -535,52 +552,179 @@ function computeSessionLevels(h1Bars) {
   };
 }
 
+// ── SFU level computation ─────────────────────────────────────────────────────
+// SFU (Swing Failure Unit): two consecutive 5m closes — bar N closes through a
+// 1H/4H extreme, bar N+1 closes back.  The "extreme" is defined as the highest
+// visible high (for shorts) / lowest visible low (for longs) across the last
+// 100 H1 bars + last 100 H4 bars — the price area where retail stops cluster.
+function computeSFULevels(bars1h, bars4h) {
+  const h1 = bars1h.slice(-100);
+  const h4 = bars4h.slice(-100);
+  const allHighs = [...h1, ...h4].map(b => b.high).filter(isFinite);
+  const allLows  = [...h1, ...h4].map(b => b.low).filter(isFinite);
+  if (!allHighs.length || !allLows.length) return { sfuHigh: null, sfuLow: null };
+  return {
+    sfuHigh: Math.max(...allHighs),
+    sfuLow:  Math.min(...allLows),
+  };
+}
+
+// Returns { triggered: true, level: price } when a 2-bar SFU sequence is detected
+// on the last two 5m closed bars.
+function detectSFU(bars5m, sfuHigh, sfuLow, direction) {
+  if (bars5m.length < 2) return null;
+  const prev = bars5m.at(-2);
+  const curr = bars5m.at(-1);
+
+  if (direction === 'long' && sfuLow != null) {
+    // Bar N closes below sfuLow, bar N+1 closes back above it
+    if (prev.close < sfuLow && curr.close > sfuLow) {
+      return { triggered: true, level: sfuLow };
+    }
+  }
+  if (direction === 'short' && sfuHigh != null) {
+    // Bar N closes above sfuHigh, bar N+1 closes back below it
+    if (prev.close > sfuHigh && curr.close < sfuHigh) {
+      return { triggered: true, level: sfuHigh };
+    }
+  }
+  return null;
+}
+
+// ── SFU alert builders ────────────────────────────────────────────────────────
+// Case A: SFU detected, no SFP
+function buildSFUAlert(symbol, direction, sfuLevel, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
+  const coin     = symbol.replace('_USDT', 'USDT');
+  const dir      = direction === 'long' ? 'LONG' : 'SHORT';
+  const dirEmoji = direction === 'long' ? '🟢' : '🔴';
+  const levelStr = direction === 'long' ? '1H/4H Low' : '1H/4H High';
+  const time     = new Date().toISOString().slice(11, 16) + ' UTC';
+  const locStr   = hasLocation ? `${locZone} ✅` : '❌';
+
+  return [
+    `${dirEmoji} <b>${coin} ${dir} — SFU</b>`,
+    `SFU: ${levelStr} (${sfuLevel.toPrecision(6)}) swept (2-bar close-back)`,
+    `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
+    `Time: ${time}`,
+  ].join('\n');
+}
+
+// Case B: SFU + SFP both confirmed — merged alert
+function buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuLevel) {
+  const coin     = symbol.replace('_USDT', 'USDT');
+  const dir      = direction === 'long' ? 'LONG' : 'SHORT';
+  const dirEmoji = direction === 'long' ? '🟢' : '🔴';
+  const sfpStr   = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
+  const sfuStr   = direction === 'long' ? '1H/4H Low' : '1H/4H High';
+  const time     = new Date().toISOString().slice(11, 16) + ' UTC';
+  const locStr   = hasLocation ? `${locZone} ✅` : '❌';
+
+  return [
+    `${dirEmoji} <b>${coin} ${dir} ${rank}/16 + SFU</b>`,
+    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${sfpStr}`,
+    `SFU: ${sfuStr} (${sfuLevel.toPrecision(6)}) also confirmed`,
+    `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
+    `Time: ${time}`,
+  ].join('\n');
+}
+
 // ── Signal detection (runs on each 5m candle close) ───────────────────────────
+// Three cases per direction:
+//   Case B — SFP + SFU both confirmed → merged alert (highest priority)
+//   Case C — SFP only, rank ≥ 2       → normal SFP alert
+//   Case A — SFU only, no SFP         → SFU-only alert
 async function detectSFP(symbol) {
   try {
     const buf = klineBuffers.get(symbol);
     if (!buf) return;
-    const { m5, h1 } = buf;
+    const { m5, h1, h4 } = buf;
     if (m5.length < 30 || h1.length < 50) return;
 
     const cached = levelCache.get(symbol);
     if (!cached || !Object.values(cached).some(v => v != null)) return;
-    // Merge static cached levels with live session levels
     const levels = { ...cached, ...computeSessionLevels(h1) };
 
+    // Compute SFU levels once per symbol tick
+    const { sfuHigh, sfuLow } = computeSFULevels(h1, h4 ?? []);
+
     for (const direction of ['long', 'short']) {
-      if (wasAlertedRecently(symbol, direction)) continue;
+      const sfpAlerted = wasAlertedRecently(symbol, direction);
+      const sfuAlerted = wasAlertedSFURecently(symbol, direction);
 
-      // Step 1: STRUCTURE — W or M pattern at a key level
-      const match = findSweepLevel(m5, levels, direction);
-      if (!match) continue;
+      // Detect SFU regardless of SFP dedup (SFU has its own dedup key)
+      const sfuResult = (!sfuAlerted)
+        ? detectSFU(m5, sfuHigh, sfuLow, direction)
+        : null;
 
-      const { key: levelKey } = match;
+      // Detect SFP (structure) only if not recently alerted for SFP
+      let sfpMatch = null;
+      if (!sfpAlerted) {
+        sfpMatch = findSweepLevel(m5, levels, direction);
+      }
+
       const currentPrice = m5.at(-1).close;
 
-      // Step 2: LOCATION — 1H fib zone
-      const locZone     = checkGSLocation(h1, direction, currentPrice);
-      const hasLocation = locZone != null;
+      // Compute location + momentum once (shared by all cases that need it)
+      let locZone = null, hasLocation = false;
+      let hasOBV = false, hasRSI = false, hasMACD = false;
+      let rank = 0;
 
-      // Step 3: MOMENTUM — divergence on 5m
-      const hasOBV  = checkOBVDivergence(m5, direction);
-      const hasRSI  = checkRSIDivergence(m5, direction);
-      const hasMACD = checkMACDDivergence(m5, direction);
+      const needsConfluence = sfpMatch != null || sfuResult != null;
+      if (needsConfluence) {
+        locZone     = checkGSLocation(h1, direction, currentPrice);
+        hasLocation = locZone != null;
+        hasOBV      = checkOBVDivergence(m5, direction);
+        hasRSI      = checkRSIDivergence(m5, direction);
+        hasMACD     = checkMACDDivergence(m5, direction);
+        rank        = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
+      }
 
-      const rank = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
-
-      if (rank < 2) {
-        console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
+      // ── Case B: SFP + SFU merged ──────────────────────────────────────────
+      if (sfpMatch && sfuResult) {
+        const { key: levelKey } = sfpMatch;
+        console.log(
+          `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 + SFU | ` +
+          `level=${levelKey} sfuLevel=${sfuResult.level.toPrecision(6)} | ` +
+          `loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
+        );
+        await sendTelegram(
+          buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult.level)
+        );
+        markAlerted(symbol, direction);
+        markAlertedSFU(symbol, direction);
         continue;
       }
 
-      console.log(
-        `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
-        `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
-      );
+      // ── Case C: SFP only ──────────────────────────────────────────────────
+      if (sfpMatch && !sfuResult) {
+        if (rank < 2) {
+          console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
+          continue;
+        }
+        const { key: levelKey } = sfpMatch;
+        console.log(
+          `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
+          `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
+        );
+        await sendTelegram(
+          buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
+        );
+        markAlerted(symbol, direction);
+        continue;
+      }
 
-      await sendTelegram(buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD));
-      markAlerted(symbol, direction);
+      // ── Case A: SFU only (no SFP match) ──────────────────────────────────
+      if (sfuResult && !sfpMatch) {
+        console.log(
+          `[scanner] ☆ ${symbol} ${direction.toUpperCase()} SFU | ` +
+          `sfuLevel=${sfuResult.level.toPrecision(6)} | ` +
+          `loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
+        );
+        await sendTelegram(
+          buildSFUAlert(symbol, direction, sfuResult.level, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
+        );
+        markAlertedSFU(symbol, direction);
+      }
     }
   } catch (err) {
     console.error(`[scanner] detectSFP ${symbol}: ${err.message}`);
@@ -594,16 +738,18 @@ function wsSend(obj) {
 
 function subscribeSymbols(symbols) {
   for (const symbol of symbols) {
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'  } });
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60' } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'   } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60'  } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min240' } });
   }
-  console.log(`[scanner] Subscribed klines for ${symbols.length} symbols (5m + 1H)`);
+  console.log(`[scanner] Subscribed klines for ${symbols.length} symbols (5m + 1H + 4H)`);
 }
 
 function unsubscribeSymbols(symbols) {
   for (const symbol of symbols) {
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'  } });
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60' } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'   } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60'  } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min240' } });
   }
 }
 
@@ -618,7 +764,7 @@ function handleMessage(raw) {
   if (channel === 'push.kline') {
     if (!symbol || !data) return;
     const interval = data.interval;
-    if (interval !== 'Min5' && interval !== 'Min60') return;
+    if (interval !== 'Min5' && interval !== 'Min60' && interval !== 'Min240') return;
 
     const t    = data.t;
     const key  = `${symbol}:${interval}`;
