@@ -133,7 +133,7 @@ function computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp) {
     PML:        lastMonth?.low   ?? null,
     mondayHigh: lastMonday?.high ?? null,
     mondayLow:  lastMonday?.low  ?? null,
-    weeklyOpen: w1Forming?.open  ?? null,   // current (forming) week open
+    weeklyOpen: (new Date().getUTCDay() !== 1 ? w1Forming?.open : null) ?? null, // invalid on Mondays
     dailyOpen:  d1Forming?.open  ?? null,   // current (forming) day open
   };
 }
@@ -235,27 +235,48 @@ function pushBarToBuffer(symbol, interval, bar) {
 }
 
 // ── W / M structure detection ─────────────────────────────────────────────────
-// W (long SFP): within the last 4 bars a candle wicked BELOW level,
-//               current bar closes ABOVE level AND above that sweep bar's close.
-// Minimum 3 candles: bars before sweep + sweep wick + current close above.
+// W (long SFP):
+//   1. A bar in the last 4 wicked BELOW level (the sweep)
+//   2. Current bar closes ABOVE level AND above sweep bar's close
+//   3. Current bar closes ABOVE the price neckline = highest high of bars
+//      between the sweep bar and current (confirms W break, not just recovery)
+//   When sweep bar is directly before current (no bars in between), step 3
+//   is satisfied by condition 2 alone.
 function detectWPattern(bars5m, level) {
   if (bars5m.length < 5) return false;
-  const last = bars5m.at(-1);
+  const last       = bars5m.at(-1);
   if (last.close <= level) return false;
-  for (const sweepBar of bars5m.slice(-5, -1)) {
-    if (sweepBar.low < level && last.close > sweepBar.close) return true;
+  const searchBars = bars5m.slice(-5, -1);
+  for (let i = 0; i < searchBars.length; i++) {
+    const sweepBar = searchBars[i];
+    if (sweepBar.low  >= level)           continue;  // not a sweep
+    if (last.close    <= sweepBar.close)  continue;  // right leg not higher than sweep close
+    const between  = searchBars.slice(i + 1);
+    if (between.length === 0)             return true;  // adjacent — close>sweep.close is sufficient
+    const neckline = Math.max(...between.map(b => b.high));
+    if (last.close > neckline)            return true;  // price broke above W neckline
   }
   return false;
 }
 
-// M (short SFP): within the last 4 bars a candle wicked ABOVE level,
-//                current bar closes BELOW level AND below that sweep bar's close.
+// M (short SFP):
+//   1. A bar in the last 4 wicked ABOVE level (the sweep)
+//   2. Current bar closes BELOW level AND below sweep bar's close
+//   3. Current bar closes BELOW the price neckline = lowest low of bars
+//      between the sweep bar and current (confirms M break)
 function detectMPattern(bars5m, level) {
   if (bars5m.length < 5) return false;
-  const last = bars5m.at(-1);
+  const last       = bars5m.at(-1);
   if (last.close >= level) return false;
-  for (const sweepBar of bars5m.slice(-5, -1)) {
-    if (sweepBar.high > level && last.close < sweepBar.close) return true;
+  const searchBars = bars5m.slice(-5, -1);
+  for (let i = 0; i < searchBars.length; i++) {
+    const sweepBar = searchBars[i];
+    if (sweepBar.high  <= level)          continue;  // not a sweep
+    if (last.close     >= sweepBar.close) continue;  // right leg not lower than sweep close
+    const between  = searchBars.slice(i + 1);
+    if (between.length === 0)             return true;
+    const neckline = Math.min(...between.map(b => b.low));
+    if (last.close < neckline)            return true;  // price broke below M neckline
   }
   return false;
 }
@@ -336,7 +357,10 @@ function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
 //   2. Indicator at high2 < indicator at high1 (lower high = potential div)
 //   3. Neckline = lowest indicator value between high1 and high2
 //   4. CONFIRMED only when current indicator < neckline (neckline break)
-function checkDivergence(closes, indicatorValues, direction) {
+// minDiffRatio: optional minimum relative difference between the two pivot indicator
+// values — guards against near-identical values being counted as divergence.
+// Pass 0.005 (0.5%) for OBV; leave 0 for RSI and MACD.
+function checkDivergence(closes, indicatorValues, direction, minDiffRatio = 0) {
   const lookback = 5;
   const highs = [], lows = [];
   for (let i = lookback; i < closes.length - lookback; i++) {
@@ -359,6 +383,8 @@ function checkDivergence(closes, indicatorValues, direction) {
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
     if (!(closes[i2] > closes[i1] && v2 < v1)) return false;   // HH price, LH indicator
+    // Minimum meaningful difference between pivot values
+    if (minDiffRatio > 0 && Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1) < minDiffRatio) return false;
     // Neckline = lowest indicator value between the two swing highs
     const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
     if (!between.length) return false;
@@ -370,6 +396,8 @@ function checkDivergence(closes, indicatorValues, direction) {
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
     if (!(closes[i2] < closes[i1] && v2 > v1)) return false;   // LL price, HL indicator
+    // Minimum meaningful difference between pivot values
+    if (minDiffRatio > 0 && Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1) < minDiffRatio) return false;
     // Neckline = highest indicator value between the two swing lows
     const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
     if (!between.length) return false;
@@ -384,7 +412,8 @@ function checkRSIDivergence(bars5m, direction) {
 }
 
 function checkOBVDivergence(bars5m, direction) {
-  return checkDivergence(bars5m.map(b => b.close), calcOBV(bars5m), direction);
+  // 0.5% minimum difference: OBV trending in same direction as price ≠ divergence
+  return checkDivergence(bars5m.map(b => b.close), calcOBV(bars5m), direction, 0.005);
 }
 
 function checkMACDDivergence(bars5m, direction) {
