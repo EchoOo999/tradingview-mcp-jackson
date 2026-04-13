@@ -1,68 +1,65 @@
 /**
- * WebSocket-based SFP + GS Location Scanner — MEXC Perpetual Futures
+ * WebSocket SFP Scanner — MEXC Perpetual Futures
  *
- * One persistent WebSocket connection to wss://contract.mexc.com/edge
+ * CTA General Setup (3 reasons in order):
+ *   1. LOCATION  — price is at a key level (PWH/PWL/PMH/PML/Monday H-L/Daily-Weekly Open)
+ *   2. STRUCTURE — W pattern (long) or M pattern (short) confirmed on 5m
+ *   3. MOMENTUM  — divergence: OBV, RSI, MACD histogram
  *
- * REST is used ONLY for:
- *   - Bootstrap: top-50 selection + initial kline history (once at startup)
- *   - Volume refresh: re-select top-50 every 6h and update subscriptions
+ * Signal rank 1–16 (unique per confluence combination):
+ *   rank = 1 + (hasLocation<<3 | hasOBV<<2 | hasRSI<<1 | hasMACD)
  *
- * WebSocket handles everything else:
- *   - sub.kline (Min5 + Min60) for each top-50 coin
- *   - Candle close detection: when WS sends a new timestamp for a symbol+interval,
- *     the previous candle is finalized and SFP+GS detection runs immediately
- *
- * Read-only — no trading, no MEXC auth. Public endpoints only.
+ * Key levels refreshed every 1h via REST (no lookahead):
+ *   PWH / PWL        = last COMPLETED week high / low
+ *   PMH / PML        = last COMPLETED month high / low
+ *   Monday High/Low  = last Monday daily bar
+ *   Weekly Open      = current week open (forming weekly bar)
+ *   Daily Open       = current day open  (forming daily bar)
  */
 
 import WebSocket from 'ws';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Constants ──────────────────────────────────────────────────────────────────
 const WS_URL            = 'wss://contract.mexc.com/edge';
 const REST_BASE         = 'https://contract.mexc.com';
 const TELEGRAM_API      = 'https://api.telegram.org';
 
-const PING_INTERVAL_MS  = 15_000;              // server drops conn after 60s no-ping
+const PING_INTERVAL_MS  = 15_000;
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS  = 60_000;
-const VOLUME_REFRESH_MS = 60 * 60 * 1000;      // 1h between top-coin refreshes
-const ALERT_RESET_MS    = 4 * 60 * 60 * 1000; // 4h dedup window
+const VOLUME_REFRESH_MS = 60 * 60 * 1000;      // 1h
+const LEVEL_REFRESH_MS  = 60 * 60 * 1000;      // 1h (staggered 30min after volume)
+const ALERT_RESET_MS    = 4 * 60 * 60 * 1000;  // 4h dedup window
 
-const TOP_N             = 250;                 // raised — 5M filter is the real gate
-const MIN_VOLUME_USDT   = 5_000_000;           // 5M USDT 24h (~206 coins currently)
+const TOP_N           = 250;
+const MIN_VOLUME_USDT = 5_000_000;              // 5M USDT 24h
 
-const BOOTSTRAP_5M      = 100;
-const BOOTSTRAP_1H      = 500;                 // ~20 days
-const BUFFER_MAX_5M     = 150;                 // rolling buffer cap
-const BUFFER_MAX_1H     = 550;
+const BOOTSTRAP_5M  = 100;
+const BOOTSTRAP_1H  = 500;   // ~20 days of 1H bars
+const BOOTSTRAP_D1  = 14;    // 14 daily bars — enough to find last Monday
+const BOOTSTRAP_W1  = 4;     // 3 completed weeks + forming
+const BOOTSTRAP_MO  = 4;     // 3 completed months + forming
+const BUFFER_MAX_5M = 150;
+const BUFFER_MAX_1H = 550;
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── State ──────────────────────────────────────────────────────────────────────
 let ws             = null;
 let pingTimer      = null;
 let reconnectDelay = RECONNECT_BASE_MS;
 let disconnectedAt = 0;
 let shuttingDown   = false;
 
-// Kline history: symbol → { m5: Bar[], h1: Bar[] }
-// Bar = { time:number, open:number, high:number, low:number, close:number, vol:number }
-const klineBuffers = new Map();
+// Bar = { time, open, high, low, close, vol }
+const klineBuffers = new Map();   // symbol → { m5: Bar[], h1: Bar[] }
+const levelCache   = new Map();   // symbol → Levels object
+const lastWsTs     = new Map();   // "SYMBOL:Min5" → epochSeconds
+const pendingBar   = new Map();   // "SYMBOL:Min5" → forming bar data from WS
+let   topSymbols   = [];
+const alerted      = new Map();   // "SYMBOL:long" | "SYMBOL:short" → timestamp
 
-// Last seen candle-open timestamp from WS: "SYMBOL:Min5" → epochSeconds
-const lastWsTs     = new Map();
-
-// Last received WS data for the forming candle: "SYMBOL:Min5" → raw data obj
-const pendingBar   = new Map();
-
-// Current top-N symbols (updated every 6h)
-let topSymbols     = [];
-
-// Alert dedup: "SYMBOL:long" | "SYMBOL:short" → timestamp
-const alerted      = new Map();
-
-// Activity counters
 let candleCloseCount = 0;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Misc helpers ───────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function wasAlertedRecently(symbol, direction) {
@@ -73,7 +70,7 @@ function markAlerted(symbol, direction) {
   alerted.set(`${symbol}:${direction}`, Date.now());
 }
 
-// ── REST (bootstrap only) ─────────────────────────────────────────────────────
+// ── REST ───────────────────────────────────────────────────────────────────────
 async function restGet(path) {
   const res = await fetch(`${REST_BASE}${path}`, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw new Error(`REST ${path}: HTTP ${res.status}`);
@@ -84,22 +81,68 @@ async function restGet(path) {
   return json.data;
 }
 
-// ── Top-50 selection ──────────────────────────────────────────────────────────
+// ── Kline parser ───────────────────────────────────────────────────────────────
+// excludeLast=true  → skip the forming (still-open) bar — use for history
+// excludeLast=false → include it — use to get the forming bar's open price
+function parseKlines(d, excludeLast = true) {
+  if (!d || !Array.isArray(d.time) || !d.time.length) return [];
+  const end = excludeLast ? d.time.length - 1 : d.time.length;
+  return Array.from({ length: end }, (_, i) => ({
+    time:  d.time[i],
+    open:  parseFloat(d.open[i]),
+    high:  parseFloat(d.high[i]),
+    low:   parseFloat(d.low[i]),
+    close: parseFloat(d.close[i]),
+    vol:   parseFloat((d.vol || [])[i] || 0),
+  }));
+}
+
+// ── Key level computation ─────────────────────────────────────────────────────
+// Priority order for level matching (highest priority first)
+const LEVEL_PRIORITY = ['PML', 'PMH', 'PWL', 'PWH', 'mondayLow', 'mondayHigh', 'weeklyOpen', 'dailyOpen'];
+
+const LEVEL_DISPLAY = {
+  PWH:        'PWH',
+  PWL:        'PWL',
+  PMH:        'PMH (Monthly)',
+  PML:        'PML (Monthly)',
+  mondayHigh: 'Monday High',
+  mondayLow:  'Monday Low',
+  weeklyOpen: 'Weekly Open',
+  dailyOpen:  'Daily Open',
+};
+
+function computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp) {
+  const lastWeek   = w1Comp.at(-1)  ?? null;   // last COMPLETED week bar
+  const lastMonth  = moComp.at(-1)  ?? null;   // last COMPLETED month bar
+
+  // Find the most recent Monday in completed daily bars
+  const mondays    = d1Comp.filter(b => new Date(b.time * 1000).getUTCDay() === 1);
+  const lastMonday = mondays.at(-1) ?? null;
+
+  return {
+    PWH:        lastWeek?.high   ?? null,
+    PWL:        lastWeek?.low    ?? null,
+    PMH:        lastMonth?.high  ?? null,
+    PML:        lastMonth?.low   ?? null,
+    mondayHigh: lastMonday?.high ?? null,
+    mondayLow:  lastMonday?.low  ?? null,
+    weeklyOpen: w1Forming?.open  ?? null,   // current (forming) week open
+    dailyOpen:  d1Forming?.open  ?? null,   // current (forming) day open
+  };
+}
+
+// ── Top-N selection ───────────────────────────────────────────────────────────
 async function fetchTopSymbols() {
   console.log('[scanner] Selecting top symbols via REST...');
-
-  // Fetch detail + tickers in parallel (both are public, no auth needed)
   const [detail, tickers] = await Promise.all([
     restGet('/api/v1/contract/detail'),
     restGet('/api/v1/contract/ticker'),
   ]);
-
-  // amount24 = 24h USDT turnover (confirmed from docs)
   const volMap = new Map();
   for (const t of (tickers || [])) {
     if (t.symbol) volMap.set(t.symbol, parseFloat(t.amount24 || 0));
   }
-
   const selected = (detail || [])
     .filter(c => c.symbol && c.symbol.endsWith('_USDT') && !c.symbol.includes('STOCK'))
     .map(c => ({ symbol: c.symbol, vol: volMap.get(c.symbol) ?? 0 }))
@@ -107,77 +150,133 @@ async function fetchTopSymbols() {
     .sort((a, b) => b.vol - a.vol)
     .slice(0, TOP_N)
     .map(c => c.symbol);
-
-  console.log(`[scanner] ${selected.length} coins selected (≥${MIN_VOLUME_USDT / 1e6}M USDT volume)`);
+  console.log(`[scanner] ${selected.length} symbols selected (≥${MIN_VOLUME_USDT / 1e6}M USDT)`);
   return selected;
 }
 
-// ── Bootstrap kline history ───────────────────────────────────────────────────
+// ── Bootstrap klines + levels ─────────────────────────────────────────────────
 async function bootstrapKlines(symbols) {
-  console.log(`[scanner] Bootstrapping klines for ${symbols.length} coins...`);
+  console.log(`[scanner] Bootstrapping klines + key levels for ${symbols.length} symbols...`);
   let ok = 0;
-
   for (const symbol of symbols) {
     try {
-      const [raw5m, raw1h] = await Promise.all([
+      const [raw5m, raw1h, rawD1, rawW1, rawMo] = await Promise.all([
         restGet(`/api/v1/contract/kline/${symbol}?interval=Min5&limit=${BOOTSTRAP_5M}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Min60&limit=${BOOTSTRAP_1H}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Day1&limit=${BOOTSTRAP_D1}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Week1&limit=${BOOTSTRAP_W1}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Month1&limit=${BOOTSTRAP_MO}`),
       ]);
 
-      // Exclude the last bar — it may be the currently-forming candle
-      const parse = d => {
-        if (!d || !Array.isArray(d.time) || !d.time.length) return [];
-        const end = d.time.length - 1; // skip last
-        return Array.from({ length: end }, (_, i) => ({
-          time:  d.time[i],
-          open:  parseFloat(d.open[i]),
-          high:  parseFloat(d.high[i]),
-          low:   parseFloat(d.low[i]),
-          close: parseFloat(d.close[i]),
-          vol:   parseFloat((d.vol || [])[i] || 0),
-        }));
-      };
+      klineBuffers.set(symbol, {
+        m5: parseKlines(raw5m),
+        h1: parseKlines(raw1h),
+      });
 
-      klineBuffers.set(symbol, { m5: parse(raw5m), h1: parse(raw1h) });
+      // Completed bars (exclude forming) + the forming bar's open for daily/weekly open levels
+      const d1Comp    = parseKlines(rawD1, true);
+      const d1Forming = parseKlines(rawD1, false).at(-1) ?? null;
+      const w1Comp    = parseKlines(rawW1, true);
+      const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
+      const moComp    = parseKlines(rawMo, true);
+
+      levelCache.set(symbol, computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp));
       ok++;
     } catch (err) {
       console.error(`[scanner] Bootstrap ${symbol}: ${err.message}`);
       klineBuffers.set(symbol, { m5: [], h1: [] });
+      levelCache.set(symbol, {});
     }
-
-    await sleep(400); // ~5 req/s during bootstrap — safely under 10/s MEXC limit
+    await sleep(400);   // ~2.5 symbols/s — safely under MEXC 20 req/s limit
   }
-
   console.log(`[scanner] Bootstrap done: ${ok}/${symbols.length} symbols`);
 }
 
-// ── Kline buffer update ───────────────────────────────────────────────────────
+// ── Level refresh (every 1h) ──────────────────────────────────────────────────
+async function refreshLevels() {
+  console.log('[scanner] Refreshing key levels...');
+  let ok = 0;
+  for (const symbol of topSymbols) {
+    try {
+      const [rawD1, rawW1, rawMo] = await Promise.all([
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Day1&limit=${BOOTSTRAP_D1}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Week1&limit=${BOOTSTRAP_W1}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Month1&limit=${BOOTSTRAP_MO}`),
+      ]);
+      const d1Comp    = parseKlines(rawD1, true);
+      const d1Forming = parseKlines(rawD1, false).at(-1) ?? null;
+      const w1Comp    = parseKlines(rawW1, true);
+      const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
+      const moComp    = parseKlines(rawMo, true);
+      levelCache.set(symbol, computeLevels(d1Comp, d1Forming, w1Comp, w1Forming, moComp));
+      ok++;
+    } catch (err) {
+      console.error(`[scanner] Level refresh ${symbol}: ${err.message}`);
+    }
+    await sleep(300);
+  }
+  console.log(`[scanner] Level refresh done: ${ok}/${topSymbols.length}`);
+}
+
+// ── Buffer update ─────────────────────────────────────────────────────────────
 function pushBarToBuffer(symbol, interval, bar) {
   const buf = klineBuffers.get(symbol);
   if (!buf) return;
-
   const arr = interval === 'Min5' ? buf.m5 : buf.h1;
   const max = interval === 'Min5' ? BUFFER_MAX_5M : BUFFER_MAX_1H;
-
   arr.push(bar);
   if (arr.length > max) arr.shift();
 }
 
-// ── RSI (Wilder smoothed, period 14) ─────────────────────────────────────────
-function calcRSI(closes, period = 14) {
-  const rsi = new Array(period).fill(null);
-  if (closes.length <= period) return rsi;
+// ── W / M structure detection ─────────────────────────────────────────────────
+// W (long SFP): within the last 4 bars a candle wicked BELOW level,
+//               current bar closes ABOVE level AND above that sweep bar's close.
+// Minimum 3 candles: bars before sweep + sweep wick + current close above.
+function detectWPattern(bars5m, level) {
+  if (bars5m.length < 5) return false;
+  const last = bars5m.at(-1);
+  if (last.close <= level) return false;
+  for (const sweepBar of bars5m.slice(-5, -1)) {
+    if (sweepBar.low < level && last.close > sweepBar.close) return true;
+  }
+  return false;
+}
 
+// M (short SFP): within the last 4 bars a candle wicked ABOVE level,
+//                current bar closes BELOW level AND below that sweep bar's close.
+function detectMPattern(bars5m, level) {
+  if (bars5m.length < 5) return false;
+  const last = bars5m.at(-1);
+  if (last.close >= level) return false;
+  for (const sweepBar of bars5m.slice(-5, -1)) {
+    if (sweepBar.high > level && last.close < sweepBar.close) return true;
+  }
+  return false;
+}
+
+// Returns highest-priority level that was swept, or null.
+function findSweepLevel(bars5m, levels, direction) {
+  for (const key of LEVEL_PRIORITY) {
+    const price = levels[key];
+    if (price == null || !isFinite(price) || price <= 0) continue;
+    if (direction === 'long'  && detectWPattern(bars5m, price)) return { key, price };
+    if (direction === 'short' && detectMPattern(bars5m, price)) return { key, price };
+  }
+  return null;
+}
+
+// ── RSI (Wilder smoothing, period 14) ────────────────────────────────────────
+function calcRSI(closes, period = 14) {
+  const rsi = new Array(period).fill(NaN);
+  if (closes.length <= period) return rsi;
   let gainSum = 0, lossSum = 0;
   for (let i = 1; i <= period; i++) {
     const d = closes[i] - closes[i - 1];
     gainSum += Math.max(0, d);
     lossSum += Math.max(0, -d);
   }
-  let avgGain = gainSum / period;
-  let avgLoss = lossSum / period;
+  let avgGain = gainSum / period, avgLoss = lossSum / period;
   rsi.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss));
-
   for (let i = period + 1; i < closes.length; i++) {
     const d = closes[i] - closes[i - 1];
     avgGain = (avgGain * (period - 1) + Math.max(0, d))  / period;
@@ -187,8 +286,85 @@ function calcRSI(closes, period = 14) {
   return rsi;
 }
 
-// ── Pivot detection ───────────────────────────────────────────────────────────
-function findPivots(bars, lookback = 5) {
+// ── OBV ───────────────────────────────────────────────────────────────────────
+function calcOBV(bars) {
+  const obv = [0];
+  for (let i = 1; i < bars.length; i++) {
+    const prev = obv[i - 1];
+    if      (bars[i].close > bars[i - 1].close) obv.push(prev + bars[i].vol);
+    else if (bars[i].close < bars[i - 1].close) obv.push(prev - bars[i].vol);
+    else                                          obv.push(prev);
+  }
+  return obv;
+}
+
+// ── MACD histogram (12/26/9) ──────────────────────────────────────────────────
+function calcEMA(data, period) {
+  if (!data.length) return [];
+  const k = 2 / (period + 1);
+  const ema = [data[0]];
+  for (let i = 1; i < data.length; i++) ema.push(data[i] * k + ema[i - 1] * (1 - k));
+  return ema;
+}
+
+function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
+  // Return NaN-filled array if not enough data so divergence check fails cleanly
+  if (closes.length < slow + signal) return new Array(closes.length).fill(NaN);
+  const emaFast    = calcEMA(closes, fast);
+  const emaSlow    = calcEMA(closes, slow);
+  const macdLine   = emaFast.map((v, i) => v - emaSlow[i]);
+  const signalLine = calcEMA(macdLine, signal);
+  return macdLine.map((v, i) => v - signalLine[i]);
+}
+
+// ── Generic divergence (price pivots vs indicator values, lookback 5) ──────────
+// Bull: price makes lower low, indicator makes higher low
+// Bear: price makes higher high, indicator makes lower high
+function checkDivergence(closes, indicatorValues, direction) {
+  const lookback = 5;
+  const highs = [], lows = [];
+  for (let i = lookback; i < closes.length - lookback; i++) {
+    let isH = true, isL = true;
+    for (let j = i - lookback; j <= i + lookback; j++) {
+      if (j === i) continue;
+      if (closes[j] >= closes[i]) isH = false;
+      if (closes[j] <= closes[i]) isL = false;
+    }
+    if (isH) highs.push(i);
+    if (isL)  lows.push(i);
+  }
+
+  if (direction === 'short') {
+    const [i1, i2] = highs.slice(-2);
+    if (i1 == null || i2 == null) return false;
+    const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
+    if (!isFinite(v1) || !isFinite(v2)) return false;
+    return closes[i2] > closes[i1] && v2 < v1;   // HH price, LH indicator = bearish div
+  } else {
+    const [i1, i2] = lows.slice(-2);
+    if (i1 == null || i2 == null) return false;
+    const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
+    if (!isFinite(v1) || !isFinite(v2)) return false;
+    return closes[i2] < closes[i1] && v2 > v1;   // LL price, HL indicator = bullish div
+  }
+}
+
+function checkRSIDivergence(bars5m, direction) {
+  const closes = bars5m.map(b => b.close);
+  return checkDivergence(closes, calcRSI(closes), direction);
+}
+
+function checkOBVDivergence(bars5m, direction) {
+  return checkDivergence(bars5m.map(b => b.close), calcOBV(bars5m), direction);
+}
+
+function checkMACDDivergence(bars5m, direction) {
+  const closes = bars5m.map(b => b.close);
+  return checkDivergence(closes, calcMACDHistogram(closes), direction);
+}
+
+// ── GS Location — 1H fib zone check ──────────────────────────────────────────
+function findBarPivots(bars, lookback = 5) {
   const highs = [], lows = [];
   for (let i = lookback; i < bars.length - lookback; i++) {
     let isHigh = true, isLow = true;
@@ -198,43 +374,18 @@ function findPivots(bars, lookback = 5) {
       if (bars[j].low  <= bars[i].low)  isLow  = false;
     }
     if (isHigh) highs.push({ index: i, price: bars[i].high });
-    if (isLow)  lows.push ({ index: i, price: bars[i].low  });
+    if (isLow)   lows.push({ index: i, price: bars[i].low  });
   }
   return { highs, lows };
 }
 
-// ── RSI divergence ────────────────────────────────────────────────────────────
-function checkDivergence(bars5m, direction) {
-  const rsiArr = calcRSI(bars5m.map(b => b.close));
-  const { highs, lows } = findPivots(bars5m, 3);
-
-  if (direction === 'short') {
-    const last2 = highs.slice(-2);
-    if (last2.length < 2) return false;
-    const [h1, h2] = last2;
-    const r1 = rsiArr[h1.index], r2 = rsiArr[h2.index];
-    if (r1 == null || r2 == null) return false;
-    return h2.price > h1.price && r2 < r1; // higher high, lower RSI = bear div
-  } else {
-    const last2 = lows.slice(-2);
-    if (last2.length < 2) return false;
-    const [l1, l2] = last2;
-    const r1 = rsiArr[l1.index], r2 = rsiArr[l2.index];
-    if (r1 == null || r2 == null) return false;
-    return l2.price < l1.price && r2 > r1; // lower low, higher RSI = bull div
-  }
-}
-
-// ── GS Location check ─────────────────────────────────────────────────────────
 function checkGSLocation(bars1h, direction, currentPrice) {
   const recent = bars1h.slice(-50);
   if (recent.length < 20) return null;
-
-  const { highs, lows } = findPivots(recent, 5);
+  const { highs, lows } = findBarPivots(recent, 5);
   if (!highs.length || !lows.length) return null;
-
-  const swingHigh = highs[highs.length - 1].price;
-  const swingLow  = lows[lows.length  - 1].price;
+  const swingHigh = highs.at(-1).price;
+  const swingLow  = lows.at(-1).price;
   const range     = swingHigh - swingLow;
   if (range <= 0) return null;
 
@@ -248,6 +399,38 @@ function checkGSLocation(bars1h, direction, currentPrice) {
     if (r >= 0.382 && r <= 0.500) return 'DCZ (0.382–0.500)';
   }
   return null;
+}
+
+// ── Scoring ───────────────────────────────────────────────────────────────────
+// rank = 1 + (hasLocation<<3 | hasOBV<<2 | hasRSI<<1 | hasMACD)
+// This produces the exact 16-entry table from the spec without a lookup table.
+function calcRank(hasLocation, hasOBV, hasRSI, hasMACD) {
+  return 1 + ((hasLocation ? 8 : 0) | (hasOBV ? 4 : 0) | (hasRSI ? 2 : 0) | (hasMACD ? 1 : 0));
+}
+
+function rankEmoji(rank) {
+  if (rank <= 4)  return '⚡';
+  if (rank <= 8)  return '🎯';
+  if (rank <= 12) return '🔥';
+  if (rank <= 15) return '💎';
+  return '💎💎';
+}
+
+// ── Alert builder ─────────────────────────────────────────────────────────────
+function buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
+  const coin  = symbol.replace('_USDT', 'USDT');
+  const dir   = direction === 'long' ? 'LONG' : 'SHORT';
+  const emoji = rankEmoji(rank);
+  const time  = new Date().toISOString().slice(11, 16) + ' UTC';
+  const swept = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
+  const locStr = hasLocation ? `${locZone} ✅` : '❌';
+
+  return [
+    `${emoji} <b>${coin} ${dir} ${rank}/16</b>`,
+    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${swept}`,
+    `Location: ${locStr} | OBV: ${hasOBV ? '✅' : '❌'} | RSI: ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'}`,
+    `Time: ${time}`,
+  ].join('\n');
 }
 
 // ── Telegram ──────────────────────────────────────────────────────────────────
@@ -274,58 +457,44 @@ async function sendTelegram(text) {
   }
 }
 
-function buildAlert(symbol, direction, location, hasDivergence) {
-  const coin  = symbol.replace('_', '');
-  const time  = new Date().toISOString().slice(11, 16) + ' UTC';
-  const dir   = direction === 'long' ? 'LONG' : 'SHORT';
-  const level = direction === 'long' ? 'PWL swept' : 'PWH swept';
-  const div   = hasDivergence ? '\nDivergence: RSI' : '';
-
-  return location
-    ? `🎯 <b>SFP + GS LOCATION</b>\nCoin: ${coin}\nDirection: ${dir}\nLevel: ${level}\nLocation: ${location}${div}\nTime: ${time}`
-    : `⚡ <b>SFP ONLY</b>\nCoin: ${coin}\nDirection: ${dir}\nLevel: ${level}${div}\nTime: ${time}`;
-}
-
-// ── SFP detection (runs on each 5m candle close) ──────────────────────────────
+// ── Signal detection (runs on each 5m candle close) ───────────────────────────
 async function detectSFP(symbol) {
   try {
     const buf = klineBuffers.get(symbol);
     if (!buf) return;
-
     const { m5, h1 } = buf;
     if (m5.length < 30 || h1.length < 50) return;
 
-    // PWH/PWL = highest high + lowest low of last 20 days on 1H (480 bars)
-    const refBars = h1.slice(-480);
-    const PWH     = Math.max(...refBars.map(b => b.high));
-    const PWL     = Math.min(...refBars.map(b => b.low));
-    if (!isFinite(PWH) || !isFinite(PWL)) return;
-
-    // Most recent closed 5m bar = last bar in buffer
-    const sfpBar = m5[m5.length - 1];
-    if (!sfpBar) return;
-    const currentPrice = sfpBar.close;
-
-    const isLongSFP  = sfpBar.low  < PWL && sfpBar.close > PWL;
-    const isShortSFP = sfpBar.high > PWH && sfpBar.close < PWH;
-    if (!isLongSFP && !isShortSFP) return;
+    const levels = levelCache.get(symbol);
+    if (!levels || !Object.values(levels).some(v => v != null)) return;
 
     for (const direction of ['long', 'short']) {
-      if (direction === 'long'  && !isLongSFP)  continue;
-      if (direction === 'short' && !isShortSFP) continue;
       if (wasAlertedRecently(symbol, direction)) continue;
 
-      const hasDivergence = checkDivergence(m5, direction);
-      const location      = checkGSLocation(h1, direction, currentPrice);
+      // Step 1: STRUCTURE — W or M pattern at a key level
+      const match = findSweepLevel(m5, levels, direction);
+      if (!match) continue;
+
+      const { key: levelKey } = match;
+      const currentPrice = m5.at(-1).close;
+
+      // Step 2: LOCATION — 1H fib zone
+      const locZone     = checkGSLocation(h1, direction, currentPrice);
+      const hasLocation = locZone != null;
+
+      // Step 3: MOMENTUM — divergence on 5m
+      const hasOBV  = checkOBVDivergence(m5, direction);
+      const hasRSI  = checkRSIDivergence(m5, direction);
+      const hasMACD = checkMACDDivergence(m5, direction);
+
+      const rank = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
 
       console.log(
-        `[scanner] ★ SIGNAL ${symbol} ${direction.toUpperCase()} | ` +
-        `location=${location || 'none'} | div=${hasDivergence} | ` +
-        `PWH=${PWH.toFixed(4)} PWL=${PWL.toFixed(4)} | ` +
-        `bar: H=${sfpBar.high} L=${sfpBar.low} C=${sfpBar.close}`
+        `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
+        `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
       );
 
-      await sendTelegram(buildAlert(symbol, direction, location, hasDivergence));
+      await sendTelegram(buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD));
       markAlerted(symbol, direction);
     }
   } catch (err) {
@@ -333,20 +502,17 @@ async function detectSFP(symbol) {
   }
 }
 
-// ── WebSocket send helper ─────────────────────────────────────────────────────
+// ── WebSocket helpers ─────────────────────────────────────────────────────────
 function wsSend(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-  }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-// ── Subscribe / unsubscribe klines ────────────────────────────────────────────
 function subscribeSymbols(symbols) {
   for (const symbol of symbols) {
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'  } });
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60' } });
   }
-  console.log(`[scanner] Subscribed klines for ${symbols.length} coins (5m + 1H)`);
+  console.log(`[scanner] Subscribed klines for ${symbols.length} symbols (5m + 1H)`);
 }
 
 function unsubscribeSymbols(symbols) {
@@ -359,29 +525,21 @@ function unsubscribeSymbols(symbols) {
 // ── Incoming WS message handler ───────────────────────────────────────────────
 function handleMessage(raw) {
   let msg;
-  try {
-    msg = JSON.parse(raw);
-  } catch {
-    return;
-  }
+  try { msg = JSON.parse(raw); } catch { return; }
 
   const { channel, symbol, data } = msg;
-
-  if (channel === 'pong') return; // heartbeat ACK
+  if (channel === 'pong') return;
 
   if (channel === 'push.kline') {
     if (!symbol || !data) return;
-
     const interval = data.interval;
     if (interval !== 'Min5' && interval !== 'Min60') return;
 
-    const t   = data.t;   // candle open timestamp (seconds)
-    const key = `${symbol}:${interval}`;
+    const t    = data.t;
+    const key  = `${symbol}:${interval}`;
     const lastT = lastWsTs.get(key);
 
-    // ── Candle close detected: timestamp changed ──────────────────────────────
-    // When a NEW candle opens (t !== lastT), the PREVIOUS candle is finalized.
-    // We use the last WS data received for that previous candle timestamp.
+    // New timestamp → previous candle is now closed
     if (lastT !== undefined && t !== lastT) {
       const prev = pendingBar.get(key);
       if (prev) {
@@ -393,10 +551,8 @@ function handleMessage(raw) {
           close: parseFloat(prev.c),
           vol:   parseFloat(prev.v || 0),
         };
-
         if (isFinite(closedBar.close) && closedBar.close > 0) {
           pushBarToBuffer(symbol, interval, closedBar);
-
           if (interval === 'Min5') {
             candleCloseCount++;
             if (candleCloseCount % 100 === 0) {
@@ -410,7 +566,6 @@ function handleMessage(raw) {
       }
     }
 
-    // Store forming candle data and current timestamp
     pendingBar.set(key, data);
     lastWsTs.set(key, t);
   }
@@ -420,32 +575,23 @@ function handleMessage(raw) {
 function connect() {
   if (shuttingDown) return;
   console.log(`[scanner] Connecting WebSocket → ${WS_URL}`);
-
   ws = new WebSocket(WS_URL);
 
   ws.on('open', () => {
     console.log('[scanner] WebSocket connected');
-    reconnectDelay = RECONNECT_BASE_MS; // reset backoff on successful connect
-
-    // Start ping timer
+    reconnectDelay = RECONNECT_BASE_MS;
     clearInterval(pingTimer);
-    pingTimer = setInterval(() => {
-      wsSend({ method: 'ping' });
-    }, PING_INTERVAL_MS);
-
-    // Re-subscribe to all current top symbols
+    pingTimer = setInterval(() => wsSend({ method: 'ping' }), PING_INTERVAL_MS);
     subscribeSymbols(topSymbols);
   });
 
   ws.on('message', (raw) => {
-    try {
-      handleMessage(raw.toString());
-    } catch (err) {
+    try { handleMessage(raw.toString()); } catch (err) {
       console.error('[scanner] handleMessage error:', err.message);
     }
   });
 
-  ws.on('close', (code, reason) => {
+  ws.on('close', (code) => {
     clearInterval(pingTimer);
     disconnectedAt = Date.now();
     if (!shuttingDown) {
@@ -456,7 +602,6 @@ function connect() {
 
   ws.on('error', (err) => {
     console.error(`[scanner] WebSocket error: ${err.message}`);
-    // 'close' event fires after 'error', so reconnect is handled there
   });
 }
 
@@ -464,47 +609,34 @@ function scheduleReconnect() {
   if (shuttingDown) return;
   setTimeout(async () => {
     const downtime = Date.now() - disconnectedAt;
-
-    // If disconnected > 10 min, re-bootstrap kline history to fill the gap
     if (downtime > 10 * 60 * 1000) {
-      console.log(`[scanner] Disconnected for ${Math.round(downtime / 60000)}min — re-bootstrapping klines`);
-      try {
-        await bootstrapKlines(topSymbols);
-      } catch (err) {
+      console.log(`[scanner] Disconnected ${Math.round(downtime / 60000)}min — re-bootstrapping klines`);
+      try { await bootstrapKlines(topSymbols); } catch (err) {
         console.error(`[scanner] Re-bootstrap failed: ${err.message}`);
       }
     }
-
     connect();
-
-    // Increase backoff for next failure (exponential, capped at max)
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   }, reconnectDelay);
 }
 
-// ── Top-50 volume refresh (every 6h) ─────────────────────────────────────────
+// ── Volume refresh (every 1h) ─────────────────────────────────────────────────
 async function refreshTopSymbols() {
   try {
-    const newTop = await fetchTopSymbols();
-
+    const newTop  = await fetchTopSymbols();
     const added   = newTop.filter(s => !topSymbols.includes(s));
     const removed = topSymbols.filter(s => !newTop.includes(s));
 
     if (added.length || removed.length) {
-      console.log(`[scanner] Top-50 refresh: +${added.length} added, -${removed.length} removed`);
-
-      // Unsubscribe dropped coins
+      console.log(`[scanner] Top refresh: +${added.length} added, -${removed.length} removed`);
       if (removed.length) unsubscribeSymbols(removed);
-
-      // Bootstrap + subscribe new coins
       if (added.length) {
         await bootstrapKlines(added);
         subscribeSymbols(added);
       }
-
       topSymbols = newTop;
     } else {
-      console.log('[scanner] Top-50 refresh: no changes');
+      console.log('[scanner] Top refresh: no changes');
     }
   } catch (err) {
     console.error(`[scanner] refreshTopSymbols failed: ${err.message}`);
@@ -513,31 +645,32 @@ async function refreshTopSymbols() {
 
 // ── Export ────────────────────────────────────────────────────────────────────
 export async function startScanner() {
-  console.log('[scanner] ── WebSocket SFP Scanner starting ──');
-  console.log('[scanner] Architecture: 1 WS connection | REST for bootstrap only | 0 REST polling');
+  console.log('[scanner] ── CTA SFP Scanner starting ──');
+  console.log('[scanner] Setup: Location (key levels) → Structure (W/M) → Momentum (OBV + RSI + MACD)');
+  console.log('[scanner] Rank formula: 1 + (loc<<3 | obv<<2 | rsi<<1 | macd)  →  1/16 to 16/16');
 
-  // Safety net for any unexpected async errors
-  process.on('unhandledRejection', (reason) => {
-    console.error('[scanner] Unhandled rejection:', reason);
-  });
-  process.on('uncaughtException', (err) => {
-    console.error('[scanner] Uncaught exception:', err.message);
-  });
+  process.on('unhandledRejection', (reason) => console.error('[scanner] Unhandled rejection:', reason));
+  process.on('uncaughtException',  (err)    => console.error('[scanner] Uncaught exception:',  err.message));
 
-  // ── Step 1: Bootstrap via REST ────────────────────────────────────────────
+  // Step 1: Bootstrap via REST
   try {
     topSymbols = await fetchTopSymbols();
     await bootstrapKlines(topSymbols);
   } catch (err) {
-    console.error('[scanner] Bootstrap failed — scanner will retry on WS reconnect:', err.message);
-    topSymbols = topSymbols.length ? topSymbols : []; // keep whatever we had
+    console.error('[scanner] Bootstrap failed — will retry on WS reconnect:', err.message);
+    topSymbols = topSymbols.length ? topSymbols : [];
   }
 
-  // ── Step 2: Open WebSocket connection ─────────────────────────────────────
+  // Step 2: Open WebSocket
   connect();
 
-  // ── Step 3: Schedule 6h top-50 refresh ────────────────────────────────────
+  // Step 3: Hourly volume refresh
   setInterval(refreshTopSymbols, VOLUME_REFRESH_MS);
 
-  console.log('[scanner] Scanner armed — listening for candle closes via WebSocket');
+  // Step 4: Hourly level refresh — staggered 30min after volume refresh
+  setTimeout(() => {
+    setInterval(refreshLevels, LEVEL_REFRESH_MS);
+  }, 30 * 60 * 1000);
+
+  console.log('[scanner] Scanner armed — listening for W/M patterns via WebSocket');
 }
