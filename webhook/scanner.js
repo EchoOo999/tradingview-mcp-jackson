@@ -229,6 +229,9 @@ async function refreshLevels() {
       const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
       const moComp    = parseKlines(rawMo, true);
       levelCache.set(symbol, computeLevels(d1Comp, w1Comp, w1Forming, moComp));
+      // Also refresh d1 klineBuffer (used for SFU level detection)
+      const buf = klineBuffers.get(symbol);
+      if (buf) buf.d1 = d1Comp;
       ok++;
     } catch (err) {
       console.error(`[scanner] Level refresh ${symbol}: ${err.message}`);
@@ -825,9 +828,10 @@ function subscribeSymbols(symbols) {
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'   } });
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60'  } });
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min240' } });
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Day1'   } });
+    // Day1 intentionally omitted — MEXC WS does not reliably support Day1 kline
+    // subscriptions; d1 buffer is refreshed via hourly REST in refreshLevels.
   }
-  console.log(`[scanner] Subscribed klines for ${symbols.length} symbols (5m + 1H + 4H + 1D)`);
+  console.log(`[scanner] Subscribed klines for ${symbols.length} symbols (5m + 1H + 4H)`);
 }
 
 function unsubscribeSymbols(symbols) {
@@ -835,7 +839,6 @@ function unsubscribeSymbols(symbols) {
     wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'   } });
     wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60'  } });
     wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min240' } });
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Day1'   } });
   }
 }
 
@@ -850,7 +853,7 @@ function handleMessage(raw) {
   if (channel === 'push.kline') {
     if (!symbol || !data) return;
     const interval = data.interval;
-    if (interval !== 'Min5' && interval !== 'Min60' && interval !== 'Min240' && interval !== 'Day1') return;
+    if (interval !== 'Min5' && interval !== 'Min60' && interval !== 'Min240') return;
 
     const t    = data.t;
     const key  = `${symbol}:${interval}`;
@@ -872,7 +875,7 @@ function handleMessage(raw) {
           pushBarToBuffer(symbol, interval, closedBar);
           if (interval === 'Min5') {
             candleCloseCount++;
-            if (candleCloseCount % 100 === 0) {
+            if (candleCloseCount % 50 === 0) {
               console.log(`[scanner] ✓ ${candleCloseCount} candle closes processed (latest: ${symbol})`);
             }
             detectSFP(symbol).catch(err =>
