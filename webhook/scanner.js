@@ -439,41 +439,101 @@ function checkMACDDivergence(bars5m, direction) {
   return checkDivergence(closes, calcMACDHistogram(closes), direction);
 }
 
-// ── GS Location — 1H fib zone check ──────────────────────────────────────────
-function findBarPivots(bars, lookback = 5) {
-  const highs = [], lows = [];
-  for (let i = lookback; i < bars.length - lookback; i++) {
-    let isHigh = true, isLow = true;
-    for (let j = i - lookback; j <= i + lookback; j++) {
-      if (j === i) continue;
-      if (bars[j].high >= bars[i].high) isHigh = false;
-      if (bars[j].low  <= bars[i].low)  isLow  = false;
-    }
-    if (isHigh) highs.push({ index: i, price: bars[i].high });
-    if (isLow)   lows.push({ index: i, price: bars[i].low  });
-  }
-  return { highs, lows };
-}
-
+// ── GS Location — 1H significant pivot fib zone check ────────────────────────
+//
+// Significant Pivot High: 1H bar whose high is strictly above ALL 8 bars on
+//   each side — this is the M-top / swing high where sellers took over.
+// Significant Pivot Low:  1H bar whose low is strictly below ALL 8 bars on
+//   each side — this is the W-bottom / swing low where buyers took over.
+//
+// Market state determined from last 2 sig pivot highs + last 2 sig pivot lows:
+//   RANGE     = both highs roughly equal AND both lows roughly equal (≤2% diff)
+//   UPTREND   = higher highs + higher lows
+//   DOWNTREND = lower highs + lower lows
+//   (mixed / unclear → return null, no location forced)
+//
+// Fib zones (fib always drawn between most recent sig high and sig low):
+//   Range  LONG  — L.RLZ  0.618–0.786 retracement from high toward low
+//   Range  SHORT — S.RLZ  0.618–0.786 retracement from low toward high
+//   Uptrend LONG    — P.CZ  0.382–0.500 pullback from swing high
+//   Downtrend SHORT — D.CZ  0.382–0.500 bounce from swing low
 function checkGSLocation(bars1h, direction, currentPrice) {
-  const recent = bars1h.slice(-50);
-  if (recent.length < 20) return null;
-  const { highs, lows } = findBarPivots(recent, 5);
-  if (!highs.length || !lows.length) return null;
-  const swingHigh = highs.at(-1).price;
-  const swingLow  = lows.at(-1).price;
-  const range     = swingHigh - swingLow;
+  const WING      = 8;      // bars required on each side of a significant pivot
+  const RANGE_TOL = 0.02;   // 2%  — "roughly equal" threshold for market state
+  const EXACT_TOL = 0.01;   // ±1% ratio window for MM (0.618) / SHARK (0.786) labels
+
+  if (bars1h.length < WING * 2 + 5) return null;
+
+  // Scan for significant pivots (stop early when both flags go false)
+  const sigHighs = [];
+  const sigLows  = [];
+
+  for (let i = WING; i < bars1h.length - WING; i++) {
+    const pivH = bars1h[i].high;
+    const pivL = bars1h[i].low;
+    let isHigh = true, isLow = true;
+
+    for (let j = i - WING; j <= i + WING; j++) {
+      if (j === i) continue;
+      if (bars1h[j].high >= pivH) isHigh = false;
+      if (bars1h[j].low  <= pivL) isLow  = false;
+      if (!isHigh && !isLow) break;
+    }
+
+    if (isHigh) sigHighs.push({ index: i, price: pivH });
+    if (isLow)   sigLows.push({ index: i, price: pivL });
+  }
+
+  if (sigHighs.length < 2 || sigLows.length < 2) return null;
+
+  // Market state: compare the two most recent pivots of each type
+  const [h1, h2] = sigHighs.slice(-2);   // h1 = older, h2 = more recent
+  const [l1, l2] = sigLows.slice(-2);    // l1 = older, l2 = more recent
+
+  const highsEqual  = Math.abs(h2.price - h1.price) / h1.price <= RANGE_TOL;
+  const lowsEqual   = Math.abs(l2.price - l1.price) / l1.price <= RANGE_TOL;
+  const higherHighs = !highsEqual && h2.price > h1.price;
+  const higherLows  = !lowsEqual  && l2.price > l1.price;
+  const lowerHighs  = !highsEqual && h2.price < h1.price;
+  const lowerLows   = !lowsEqual  && l2.price < l1.price;
+
+  let marketState;
+  if      (highsEqual  && lowsEqual)  marketState = 'range';
+  else if (higherHighs && higherLows) marketState = 'uptrend';
+  else if (lowerHighs  && lowerLows)  marketState = 'downtrend';
+  else return null;   // mixed structure — do not force a location
+
+  const lastHigh = sigHighs.at(-1).price;
+  const lastLow  = sigLows.at(-1).price;
+  const range    = lastHigh - lastLow;
   if (range <= 0) return null;
 
-  if (direction === 'long') {
-    const r = (swingHigh - currentPrice) / range;
-    if (r >= 0.618 && r <= 0.786) return 'RLZ (0.618–0.786)';
-    if (r >= 0.382 && r <= 0.500) return 'PCZ (0.382–0.500)';
-  } else {
-    const r = (currentPrice - swingLow) / range;
-    if (r >= 0.618 && r <= 0.786) return 'SRZ (0.618–0.786)';
-    if (r >= 0.382 && r <= 0.500) return 'DCZ (0.382–0.500)';
+  if (marketState === 'range') {
+    if (direction === 'long') {
+      const ratio = (lastHigh - currentPrice) / range;
+      if (ratio < 0.618 || ratio > 0.786) return null;
+      if (Math.abs(ratio - 0.618) <= EXACT_TOL) return 'L.RLZ-MM (0.618)';
+      if (Math.abs(ratio - 0.786) <= EXACT_TOL) return 'L.RLZ-SHARK (0.786)';
+      return 'L.RLZ (0.618-0.786)';
+    } else {
+      const ratio = (currentPrice - lastLow) / range;
+      if (ratio < 0.618 || ratio > 0.786) return null;
+      if (Math.abs(ratio - 0.618) <= EXACT_TOL) return 'S.RLZ-MM (0.618)';
+      if (Math.abs(ratio - 0.786) <= EXACT_TOL) return 'S.RLZ-SHARK (0.786)';
+      return 'S.RLZ (0.618-0.786)';
+    }
   }
+
+  if (marketState === 'uptrend' && direction === 'long') {
+    const ratio = (lastHigh - currentPrice) / range;
+    if (ratio >= 0.382 && ratio <= 0.500) return 'P.CZ (0.382-0.500)';
+  }
+
+  if (marketState === 'downtrend' && direction === 'short') {
+    const ratio = (currentPrice - lastLow) / range;
+    if (ratio >= 0.382 && ratio <= 0.500) return 'D.CZ (0.382-0.500)';
+  }
+
   return null;
 }
 
