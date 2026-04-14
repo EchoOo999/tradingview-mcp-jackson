@@ -278,25 +278,31 @@ function detectWPattern(bars5m, level) {
   const last = bars5m.at(-1);
   if (last.close <= level) return false;        // rule 2: current bar above level
 
-  const n = bars5m.length;
+  const n       = bars5m.length;
+  const MIN_GAP = 5;  // fix 1: minimum bars between left and right lows
+
   // Search last 4 closed bars for the right low (sweep bar)
   for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
     const rightBar = bars5m[ri];
     if (rightBar.low >= level) continue;        // rule 1: must wick below level
 
-    // Rule 3: find left low — most recent prior bar that also touched the level
-    let leftIdx = -1;
-    for (let li = ri - 1; li >= Math.max(0, ri - 20); li--) {
-      if (bars5m[li].low <= level) { leftIdx = li; break; }
-    }
-    if (leftIdx === -1) continue;               // no left low — not a W
-    if (rightBar.close <= bars5m[leftIdx].close) continue; // rule 3: right close must be higher
+    // Fixes 1+2+3: search ALL left-low candidates with gap >= MIN_GAP.
+    // No early break — evaluate every candidate.
+    // Track highest neckline (fix 3) = most structurally significant W.
+    let bestNeckline = -Infinity;
 
-    // Rule 4: neckline = highest high between the two lows
-    const midBars = bars5m.slice(leftIdx + 1, ri);
-    if (midBars.length === 0) continue;         // no peak between lows — not a valid W
-    const neckline = Math.max(...midBars.map(b => b.high));
-    if (last.close > neckline) return true;     // rule 4: confirmed break above neckline
+    for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 20); li--) {
+      if (bars5m[li].low > level) continue;                 // must touch/sweep level
+      if (rightBar.close <= bars5m[li].close) continue;     // rule 3: right close must be higher
+
+      const midBars = bars5m.slice(li + 1, ri);
+      if (midBars.length === 0) continue;
+      const neckline = Math.max(...midBars.map(b => b.high));
+      if (neckline > bestNeckline) bestNeckline = neckline; // fix 3: keep highest neckline
+    }
+
+    if (bestNeckline === -Infinity) continue;   // no valid left low found
+    if (last.close > bestNeckline) return true; // rule 4: confirmed break above neckline
   }
   return false;
 }
@@ -311,25 +317,31 @@ function detectMPattern(bars5m, level) {
   const last = bars5m.at(-1);
   if (last.close >= level) return false;        // rule 2: current bar below level
 
-  const n = bars5m.length;
+  const n       = bars5m.length;
+  const MIN_GAP = 5;  // fix 1: minimum bars between left and right highs
+
   // Search last 4 closed bars for the right high (sweep bar)
   for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
     const rightBar = bars5m[ri];
     if (rightBar.high <= level) continue;       // rule 1: must wick above level
 
-    // Rule 3: find left high — most recent prior bar that also touched the level
-    let leftIdx = -1;
-    for (let li = ri - 1; li >= Math.max(0, ri - 20); li--) {
-      if (bars5m[li].high >= level) { leftIdx = li; break; }
-    }
-    if (leftIdx === -1) continue;               // no left high — not an M
-    if (rightBar.close >= bars5m[leftIdx].close) continue; // rule 3: right close must be lower
+    // Fixes 1+2+3: search ALL left-high candidates with gap >= MIN_GAP.
+    // No early break — evaluate every candidate.
+    // Track lowest neckline (fix 3) = most structurally significant M.
+    let bestNeckline = Infinity;
 
-    // Rule 4: neckline = lowest low between the two highs
-    const midBars = bars5m.slice(leftIdx + 1, ri);
-    if (midBars.length === 0) continue;         // no trough between highs — not a valid M
-    const neckline = Math.min(...midBars.map(b => b.low));
-    if (last.close < neckline) return true;     // rule 4: confirmed break below neckline
+    for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 20); li--) {
+      if (bars5m[li].high < level) continue;                // must touch/sweep level
+      if (rightBar.close >= bars5m[li].close) continue;     // rule 3: right close must be lower
+
+      const midBars = bars5m.slice(li + 1, ri);
+      if (midBars.length === 0) continue;
+      const neckline = Math.min(...midBars.map(b => b.low));
+      if (neckline < bestNeckline) bestNeckline = neckline; // fix 3: keep lowest neckline
+    }
+
+    if (bestNeckline === Infinity) continue;    // no valid left high found
+    if (last.close < bestNeckline) return true; // rule 4: confirmed break below neckline
   }
   return false;
 }
