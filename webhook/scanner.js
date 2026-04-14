@@ -268,41 +268,68 @@ function pushBarToBuffer(symbol, interval, bar) {
 //      between the sweep bar and current (confirms W break, not just recovery)
 //   When sweep bar is directly before current (no bars in between), step 3
 //   is satisfied by condition 2 alone.
+// W (long SFP) — all 4 rules required:
+//   1. Right low bar wicks BELOW level (sweep)
+//   2. Current bar closes ABOVE level
+//   3. Right low close > left low close (higher low = second touch higher than first)
+//   4. Current bar closes ABOVE neckline (highest high between left low and right low)
 function detectWPattern(bars5m, level) {
-  if (bars5m.length < 5) return false;
-  const last       = bars5m.at(-1);
-  if (last.close <= level) return false;
-  const searchBars = bars5m.slice(-5, -1);
-  for (let i = 0; i < searchBars.length; i++) {
-    const sweepBar = searchBars[i];
-    if (sweepBar.low  >= level)           continue;  // not a sweep
-    if (last.close    <= sweepBar.close)  continue;  // right leg not higher than sweep close
-    const between  = searchBars.slice(i + 1);
-    if (between.length === 0)             return true;  // adjacent — close>sweep.close is sufficient
-    const neckline = Math.max(...between.map(b => b.high));
-    if (last.close > neckline)            return true;  // price broke above W neckline
+  if (bars5m.length < 6) return false;
+  const last = bars5m.at(-1);
+  if (last.close <= level) return false;        // rule 2: current bar above level
+
+  const n = bars5m.length;
+  // Search last 4 closed bars for the right low (sweep bar)
+  for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
+    const rightBar = bars5m[ri];
+    if (rightBar.low >= level) continue;        // rule 1: must wick below level
+
+    // Rule 3: find left low — most recent prior bar that also touched the level
+    let leftIdx = -1;
+    for (let li = ri - 1; li >= Math.max(0, ri - 20); li--) {
+      if (bars5m[li].low <= level) { leftIdx = li; break; }
+    }
+    if (leftIdx === -1) continue;               // no left low — not a W
+    if (rightBar.close <= bars5m[leftIdx].close) continue; // rule 3: right close must be higher
+
+    // Rule 4: neckline = highest high between the two lows
+    const midBars = bars5m.slice(leftIdx + 1, ri);
+    if (midBars.length === 0) continue;         // no peak between lows — not a valid W
+    const neckline = Math.max(...midBars.map(b => b.high));
+    if (last.close > neckline) return true;     // rule 4: confirmed break above neckline
   }
   return false;
 }
 
-// M (short SFP):
-//   1. A bar in the last 4 wicked ABOVE level (the sweep)
-//   2. Current bar closes BELOW level AND below sweep bar's close
-//   3. Current bar closes BELOW the price neckline = lowest low of bars
-//      between the sweep bar and current (confirms M break)
+// M (short SFP) — all 4 rules required:
+//   1. Right high bar wicks ABOVE level (sweep)
+//   2. Current bar closes BELOW level
+//   3. Right high close < left high close (lower high = second touch lower than first)
+//   4. Current bar closes BELOW neckline (lowest low between left high and right high)
 function detectMPattern(bars5m, level) {
-  if (bars5m.length < 5) return false;
-  const last       = bars5m.at(-1);
-  if (last.close >= level) return false;
-  const searchBars = bars5m.slice(-5, -1);
-  for (let i = 0; i < searchBars.length; i++) {
-    const sweepBar = searchBars[i];
-    if (sweepBar.high  <= level)          continue;  // not a sweep
-    if (last.close     >= sweepBar.close) continue;  // right leg not lower than sweep close
-    const between  = searchBars.slice(i + 1);
-    if (between.length === 0)             return true;
-    const neckline = Math.min(...between.map(b => b.low));
-    if (last.close < neckline)            return true;  // price broke below M neckline
+  if (bars5m.length < 6) return false;
+  const last = bars5m.at(-1);
+  if (last.close >= level) return false;        // rule 2: current bar below level
+
+  const n = bars5m.length;
+  // Search last 4 closed bars for the right high (sweep bar)
+  for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
+    const rightBar = bars5m[ri];
+    if (rightBar.high <= level) continue;       // rule 1: must wick above level
+
+    // Rule 3: find left high — most recent prior bar that also touched the level
+    let leftIdx = -1;
+    for (let li = ri - 1; li >= Math.max(0, ri - 20); li--) {
+      if (bars5m[li].high >= level) { leftIdx = li; break; }
+    }
+    if (leftIdx === -1) continue;               // no left high — not an M
+    if (rightBar.close >= bars5m[leftIdx].close) continue; // rule 3: right close must be lower
+
+    // Rule 4: neckline = lowest low between the two highs
+    const midBars = bars5m.slice(leftIdx + 1, ri);
+    if (midBars.length === 0) continue;         // no trough between highs — not a valid M
+    const neckline = Math.min(...midBars.map(b => b.low));
+    if (last.close < neckline) return true;     // rule 4: confirmed break below neckline
   }
   return false;
 }
