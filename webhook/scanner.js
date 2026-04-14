@@ -29,8 +29,9 @@ const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS  = 60_000;
 const VOLUME_REFRESH_MS = 60 * 60 * 1000;      // 1h
 const LEVEL_REFRESH_MS  = 60 * 60 * 1000;      // 1h (staggered 30min after volume)
-const ALERT_RESET_MS     = 4 * 60 * 60 * 1000;  // 4h dedup window (SFP)
-const ALERT_RESET_SFU_MS = 8 * 60 * 60 * 1000;  // 8h dedup window (SFU)
+const ALERT_RESET_SESSION_MS = 4 * 60 * 60 * 1000;  // 4h dedup — session levels (Asia/London)
+const ALERT_RESET_STRUCT_MS  = 8 * 60 * 60 * 1000;  // 8h dedup — structural levels (PWH/PWL/PMH/PML/Monday/WeeklyOpen)
+const ALERT_RESET_SFU_MS     = 8 * 60 * 60 * 1000;  // 8h dedup — SFU signals
 
 const TOP_N           = 250;
 const MIN_VOLUME_USDT = 5_000_000;              // 5M USDT 24h
@@ -67,12 +68,13 @@ let candleCloseCount = 0;
 // ── Misc helpers ───────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function wasAlertedRecently(symbol, direction) {
-  const ts = alerted.get(`${symbol}:${direction}`);
-  return ts != null && Date.now() - ts < ALERT_RESET_MS;
+function wasAlertedRecently(symbol, direction, levelKey) {
+  const ts      = alerted.get(`${symbol}:${direction}:${levelKey}`);
+  const timeout = SESSION_LEVELS.has(levelKey) ? ALERT_RESET_SESSION_MS : ALERT_RESET_STRUCT_MS;
+  return ts != null && Date.now() - ts < timeout;
 }
-function markAlerted(symbol, direction) {
-  alerted.set(`${symbol}:${direction}`, Date.now());
+function markAlerted(symbol, direction, levelKey) {
+  alerted.set(`${symbol}:${direction}:${levelKey}`, Date.now());
 }
 function wasAlertedSFURecently(symbol, direction) {
   const ts = alertedSFU.get(`${symbol}:${direction}`);
@@ -113,8 +115,10 @@ function parseKlines(d, excludeLast = true) {
 // W pattern (LONG)  only fires at support levels (below price).
 // M pattern (SHORT) only fires at resistance levels (above price).
 // Session levels are computed live from the H1 buffer — not stored in levelCache.
-const LONG_LEVELS  = ['PML', 'PWL', 'mondayLow',  'weeklyOpen', 'londonLow',  'asiaLow'];
-const SHORT_LEVELS = ['PMH', 'PWH', 'mondayHigh', 'weeklyOpen', 'londonHigh', 'asiaHigh'];
+const LONG_LEVELS    = ['PML', 'PWL', 'mondayLow',  'weeklyOpen', 'londonLow',  'asiaLow'];
+const SHORT_LEVELS   = ['PMH', 'PWH', 'mondayHigh', 'weeklyOpen', 'londonHigh', 'asiaHigh'];
+// Session levels expire 2H after their session closes — use shorter dedup window
+const SESSION_LEVELS = new Set(['asiaHigh', 'asiaLow', 'londonHigh', 'londonLow']);
 
 const LEVEL_DISPLAY = {
   PWH:        'PWH',
@@ -607,8 +611,9 @@ async function sendTelegram(text) {
 
 // ── Session level computation (derived live from H1 buffer) ──────────────────
 // H1 buffer holds 550 bars (~23 days) — always enough to cover today's sessions.
-// Asia   session: 00:00–08:00 UTC — valid as a level only AFTER 08:00 UTC
-// London session: 08:00–16:00 UTC — valid as a level only AFTER 16:00 UTC
+// Asia   session: 00:00–08:00 UTC — valid 08:00–10:00 UTC only (2H window)
+// London session: 08:00–16:00 UTC — valid 16:00–18:00 UTC only (2H window)
+// Outside these windows the level is null so SFP cannot fire on a stale level.
 function computeSessionLevels(h1Bars) {
   const now  = new Date();
   const nowH = now.getUTCHours();
@@ -624,11 +629,14 @@ function computeSessionLevels(h1Bars) {
   const asiaBars   = h1Bars.filter(b => b.time >= asiaStart   && b.time < asiaEnd);
   const londonBars = h1Bars.filter(b => b.time >= londonStart && b.time < londonEnd);
 
+  const asiaValid   = nowH >= 8  && nowH < 10 && asiaBars.length   > 0;
+  const londonValid = nowH >= 16 && nowH < 18 && londonBars.length > 0;
+
   return {
-    asiaHigh:   (nowH >= 8  && asiaBars.length   > 0) ? Math.max(...asiaBars.map(b => b.high))   : null,
-    asiaLow:    (nowH >= 8  && asiaBars.length   > 0) ? Math.min(...asiaBars.map(b => b.low))    : null,
-    londonHigh: (nowH >= 16 && londonBars.length > 0) ? Math.max(...londonBars.map(b => b.high)) : null,
-    londonLow:  (nowH >= 16 && londonBars.length > 0) ? Math.min(...londonBars.map(b => b.low))  : null,
+    asiaHigh:   asiaValid   ? Math.max(...asiaBars.map(b => b.high))   : null,
+    asiaLow:    asiaValid   ? Math.min(...asiaBars.map(b => b.low))    : null,
+    londonHigh: londonValid ? Math.max(...londonBars.map(b => b.high)) : null,
+    londonLow:  londonValid ? Math.min(...londonBars.map(b => b.low))  : null,
   };
 }
 
@@ -738,7 +746,6 @@ async function detectSFP(symbol) {
     const { sfuHigh, sfuHighTF, sfuLow, sfuLowTF } = computeSFULevels(h1, h4 ?? [], d1 ?? []);
 
     for (const direction of ['long', 'short']) {
-      const sfpAlerted = wasAlertedRecently(symbol, direction);
       const sfuAlerted = wasAlertedSFURecently(symbol, direction);
 
       // Detect SFU regardless of SFP dedup (SFU has its own dedup key)
@@ -746,10 +753,10 @@ async function detectSFP(symbol) {
         ? detectSFU(m5, sfuHigh, sfuHighTF, sfuLow, sfuLowTF, direction)
         : null;
 
-      // Detect SFP (structure) only if not recently alerted for SFP
-      let sfpMatch = null;
-      if (!sfpAlerted) {
-        sfpMatch = findSweepLevel(m5, levels, direction);
+      // Find sweep level, then apply per-level dedup (session=4H, structural=8H)
+      let sfpMatch = findSweepLevel(m5, levels, direction);
+      if (sfpMatch && wasAlertedRecently(symbol, direction, sfpMatch.key)) {
+        sfpMatch = null;
       }
 
       const currentPrice = m5.at(-1).close;
@@ -780,7 +787,7 @@ async function detectSFP(symbol) {
         await sendTelegram(
           buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult)
         );
-        markAlerted(symbol, direction);
+        markAlerted(symbol, direction, levelKey);
         markAlertedSFU(symbol, direction);
         continue;
       }
@@ -799,7 +806,7 @@ async function detectSFP(symbol) {
         await sendTelegram(
           buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
         );
-        markAlerted(symbol, direction);
+        markAlerted(symbol, direction, levelKey);
         continue;
       }
 
