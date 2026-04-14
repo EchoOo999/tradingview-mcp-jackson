@@ -370,27 +370,30 @@ function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
 // ── Generic divergence with neckline confirmation ─────────────────────────────
 //
 // Bull (long):
-//   1. Find 2 price swing lows: low2 < low1 (lower low)
-//   2. Indicator at low2 > indicator at low1 (higher low = potential div)
-//   3. Neckline = highest indicator value between low1 and low2
-//   4. CONFIRMED only when current indicator > neckline (neckline break)
+//   1. Find 2 structural swing lows using bar.low (wick-based, not close-based)
+//   2. bar[i2].close < bar[i1].close — price closed lower at the second low
+//   3. Indicator at i2 > indicator at i1 (higher low = divergence)
+//   4. Neckline = highest indicator value between i1 and i2
+//   5. CONFIRMED only when current indicator > neckline (W break in indicator)
 //
 // Bear (short):
-//   1. Find 2 price swing highs: high2 > high1 (higher high)
-//   2. Indicator at high2 < indicator at high1 (lower high = potential div)
-//   3. Neckline = lowest indicator value between high1 and high2
-//   4. CONFIRMED only when current indicator < neckline (neckline break)
+//   1. Find 2 structural swing highs using bar.high (wick-based)
+//   2. bar[i2].close > bar[i1].close — price closed higher at the second high
+//   3. Indicator at i2 < indicator at i1 (lower high = divergence)
+//   4. Neckline = lowest indicator value between i1 and i2
+//   5. CONFIRMED only when current indicator < neckline (M break in indicator)
 //
-// Pivot search window: 20–60 bars ago (100 min – 5 h on 5m) to avoid
-//   micro-pivots that are too recent AND stale pivots that no longer matter.
+// Pivot detection uses bar.high / bar.low so sweep wicks register as pivots.
+// Price direction comparison uses bar.close (CTA: divergence drawn off closes).
+// Pivot search window: 20–60 bars ago (100 min – 5 h on 5m).
 // Pivot confirmation wing: 5 bars on each side must be a local extreme.
 // minDiffRatio: minimum relative indicator difference (pass 0.005 for OBV).
-function checkDivergence(closes, indicatorValues, direction, minDiffRatio = 0) {
+function checkDivergence(bars, indicatorValues, direction, minDiffRatio = 0) {
   const WING        = 5;   // bars on each side to confirm pivot is a local extreme
   const MIN_AGO     = 20;  // pivot must be ≥ 20 bars ago (100 min) — no micro-pivots
   const MAX_AGO     = 60;  // pivot must be ≤ 60 bars ago (5 h)   — no stale pivots
 
-  const n           = closes.length;
+  const n           = bars.length;
   const searchStart = Math.max(WING, n - MAX_AGO);
   const searchEnd   = n - MIN_AGO;  // exclusive; ensures pivot is ≥ MIN_AGO bars back
 
@@ -401,8 +404,8 @@ function checkDivergence(closes, indicatorValues, direction, minDiffRatio = 0) {
     let isH = true, isL = true;
     for (let j = i - WING; j <= i + WING; j++) {
       if (j < 0 || j >= n || j === i) continue;
-      if (closes[j] >= closes[i]) isH = false;
-      if (closes[j] <= closes[i]) isL = false;
+      if (bars[j].high >= bars[i].high) isH = false;  // swing high: bar[i].high > all neighbours
+      if (bars[j].low  <= bars[i].low)  isL = false;  // swing low:  bar[i].low  < all neighbours
       if (!isH && !isL) break;
     }
     if (isH) highs.push(i);
@@ -417,43 +420,43 @@ function checkDivergence(closes, indicatorValues, direction, minDiffRatio = 0) {
     if (i1 == null || i2 == null) return false;
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
-    if (!(closes[i2] > closes[i1] && v2 < v1)) return false;   // HH price, LH indicator
+    if (!(bars[i2].close > bars[i1].close && v2 < v1)) return false;  // HH close, LH indicator
     // Minimum meaningful difference between pivot values
     if (minDiffRatio > 0 && Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1) < minDiffRatio) return false;
     // Neckline = lowest indicator value between the two swing highs
     const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
     if (!between.length) return false;
     const neckline = Math.min(...between);
-    return currentInd < neckline;   // confirmed: current breaks below neckline
+    return currentInd < neckline;   // confirmed: current breaks below M neckline
   } else {
     const [i1, i2] = lows.slice(-2);
     if (i1 == null || i2 == null) return false;
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
-    if (!(closes[i2] < closes[i1] && v2 > v1)) return false;   // LL price, HL indicator
+    if (!(bars[i2].close < bars[i1].close && v2 > v1)) return false;  // LL close, HL indicator
     // Minimum meaningful difference between pivot values
     if (minDiffRatio > 0 && Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1) < minDiffRatio) return false;
     // Neckline = highest indicator value between the two swing lows
     const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
     if (!between.length) return false;
     const neckline = Math.max(...between);
-    return currentInd > neckline;   // confirmed: current breaks above neckline
+    return currentInd > neckline;   // confirmed: current breaks above W neckline
   }
 }
 
 function checkRSIDivergence(bars5m, direction) {
   const closes = bars5m.map(b => b.close);
-  return checkDivergence(closes, calcRSI(closes), direction);
+  return checkDivergence(bars5m, calcRSI(closes), direction);
 }
 
 function checkOBVDivergence(bars5m, direction) {
   // 0.5% minimum difference: OBV trending in same direction as price ≠ divergence
-  return checkDivergence(bars5m.map(b => b.close), calcOBV(bars5m), direction, 0.005);
+  return checkDivergence(bars5m, calcOBV(bars5m), direction, 0.005);
 }
 
 function checkMACDDivergence(bars5m, direction) {
   const closes = bars5m.map(b => b.close);
-  return checkDivergence(closes, calcMACDHistogram(closes), direction);
+  return checkDivergence(bars5m, calcMACDHistogram(closes), direction);
 }
 
 // ── GS Location — 1H significant pivot fib zone check ────────────────────────
