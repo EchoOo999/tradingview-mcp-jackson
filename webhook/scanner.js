@@ -569,7 +569,7 @@ function calcRank(hasLocation, hasOBV, hasRSI, hasMACD) {
 }
 
 // ── Alert builder ─────────────────────────────────────────────────────────────
-function buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
+function buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
   const coin     = symbol.replace('_USDT', '');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
   const dirEmoji = direction === 'long' ? '🟢' : '🔴';
@@ -579,7 +579,7 @@ function buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, has
 
   return [
     `${dirEmoji} <b>${coin} ${dir} ${rank}/16</b>`,
-    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${swept}`,
+    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} (${levelPrice.toPrecision(6)}) ${swept}`,
     `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
   ].join('\n');
@@ -701,14 +701,14 @@ function buildSFUAlert(symbol, direction, sfuResult, hasLocation, locZone, hasOB
 
   return [
     `${dirEmoji} <b>${coin} ${dir} 🚀SFU</b>`,
-    `Level: ${sfuResult.tf} ${side} swept`,
+    `Level: ${sfuResult.tf} ${side} swept (level=${sfuResult.level.toPrecision(6)})`,
     `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
   ].join('\n');
 }
 
 // Case B: SFU + SFP both confirmed — merged alert
-function buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult) {
+function buildMergedAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult) {
   const coin     = symbol.replace('_USDT', '');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
   const dirEmoji = direction === 'long' ? '🟢' : '🔴';
@@ -719,8 +719,8 @@ function buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZon
 
   return [
     `${dirEmoji} <b>${coin} ${dir} ${rank}/16 🚀SFU</b>`,
-    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} ${sfpStr}`,
-    `SFU: ${sfuResult.tf} ${side} swept ✅`,
+    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} (${levelPrice.toPrecision(6)}) ${sfpStr}`,
+    `SFU: ${sfuResult.tf} ${side} swept (level=${sfuResult.level.toPrecision(6)}) ✅`,
     `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
     `Time: ${time}`,
   ].join('\n');
@@ -778,14 +778,14 @@ async function detectSFP(symbol) {
 
       // ── Case B: SFP + SFU merged ──────────────────────────────────────────
       if (sfpMatch && sfuResult) {
-        const { key: levelKey } = sfpMatch;
+        const { key: levelKey, price: levelPrice } = sfpMatch;
         console.log(
           `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 + SFU | ` +
           `level=${levelKey} sfuLevel=${sfuResult.level.toPrecision(6)} (${sfuResult.tf}) | ` +
           `loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
         );
         await sendTelegram(
-          buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult)
+          buildMergedAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult)
         );
         markAlerted(symbol, direction, levelKey);
         markAlertedSFU(symbol, direction);
@@ -798,13 +798,13 @@ async function detectSFP(symbol) {
           console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
           continue;
         }
-        const { key: levelKey } = sfpMatch;
+        const { key: levelKey, price: levelPrice } = sfpMatch;
         console.log(
           `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
           `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
         );
         await sendTelegram(
-          buildAlert(symbol, direction, levelKey, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
+          buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
         );
         markAlerted(symbol, direction, levelKey);
         continue;
