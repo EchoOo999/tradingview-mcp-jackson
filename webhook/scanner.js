@@ -144,7 +144,7 @@ function computeLevels(d1Comp, w1Comp, w1Forming, moComp) {
     new Date(b.time * 1000).getUTCDay() === 1 &&
     (b.time + 86400) < nowSec
   );
-  const lastMonday = mondays.at(-1) ?? null;
+  const lastMonday = (new Date().getUTCDay() !== 1) ? (mondays.at(-1) ?? null) : null;
 
   return {
     PWH:        lastWeek?.high   ?? null,
@@ -805,6 +805,10 @@ async function detectSFP(symbol) {
 
       // ── Case B: SFP + SFU merged ──────────────────────────────────────────
       if (sfpMatch && sfuResult) {
+        if (rank < 2) {
+          console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} merged — rank 1/16, no confluence`);
+          continue;
+        }
         const { key: levelKey, price: levelPrice } = sfpMatch;
         console.log(
           `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 + SFU | ` +
