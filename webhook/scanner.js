@@ -279,7 +279,7 @@ function detectWPattern(bars5m, level) {
   if (last.close <= level) return false;        // rule 2: current bar above level
 
   const n       = bars5m.length;
-  const MIN_GAP = 5;  // fix 1: minimum bars between left and right lows
+  const MIN_GAP = 3;  // minimum bars between left and right lows (15 min on 5m)
 
   // Search last 4 closed bars for the right low (sweep bar)
   for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
