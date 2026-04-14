@@ -286,6 +286,11 @@ function detectWPattern(bars5m, level) {
     const rightBar = bars5m[ri];
     if (rightBar.low >= level) continue;        // rule 1: must wick below level
 
+    // Approach check: price must come from ABOVE before the sweep bar.
+    // At least 3 of the 5 bars before ri must close above the level.
+    const approachBars = bars5m.slice(Math.max(0, ri - 5), ri);
+    if (approachBars.filter(b => b.close > level).length < 3) continue;
+
     // Fixes 1+2+3: search ALL left-low candidates with gap >= MIN_GAP.
     // No early break — evaluate every candidate.
     // Track highest neckline (fix 3) = most structurally significant W.
@@ -318,12 +323,17 @@ function detectMPattern(bars5m, level) {
   if (last.close >= level) return false;        // rule 2: current bar below level
 
   const n       = bars5m.length;
-  const MIN_GAP = 5;  // fix 1: minimum bars between left and right highs
+  const MIN_GAP = 3;  // minimum bars between left and right highs (15 min on 5m)
 
   // Search last 4 closed bars for the right high (sweep bar)
   for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
     const rightBar = bars5m[ri];
     if (rightBar.high <= level) continue;       // rule 1: must wick above level
+
+    // Approach check: price must come from BELOW before the sweep bar.
+    // At least 3 of the 5 bars before ri must close below the level.
+    const approachBars = bars5m.slice(Math.max(0, ri - 5), ri);
+    if (approachBars.filter(b => b.close < level).length < 3) continue;
 
     // Fixes 1+2+3: search ALL left-high candidates with gap >= MIN_GAP.
     // No early break — evaluate every candidate.
