@@ -19,10 +19,6 @@
 
 import WebSocket from 'ws';
 
-// ── Debug ──────────────────────────────────────────────────────────────────────
-// Temporary verbose logging for one coin. Remove when done debugging.
-const DEBUG_SYMBOL = 'BTC_USDT';
-
 // ── Constants ──────────────────────────────────────────────────────────────────
 const WS_URL            = 'wss://contract.mexc.com/edge';
 const REST_BASE         = 'https://contract.mexc.com';
@@ -236,14 +232,6 @@ async function refreshLevels() {
       // Also refresh d1 klineBuffer (used for SFU level detection)
       const buf = klineBuffers.get(symbol);
       if (buf) buf.d1 = d1Comp;
-      // TEMPORARY: log sig pivot count per coin (WING=8 on 1H)
-      const h1Buf = buf?.h1 ?? [];
-      const { nHighs, nLows } = countSigPivots1H(h1Buf);
-      if (nHighs < 2 || nLows < 2) {
-        console.log(`[DEBUG-PIVOTS] ${symbol}: 1H sig pivots: ${nHighs} highs, ${nLows} lows — GS Location DISABLED (need ≥2 each)`);
-      } else if (symbol === DEBUG_SYMBOL) {
-        console.log(`[DEBUG-PIVOTS] ${symbol}: 1H sig pivots: ${nHighs} highs, ${nLows} lows ✓`);
-      }
       ok++;
     } catch (err) {
       console.error(`[scanner] Level refresh ${symbol}: ${err.message}`);
@@ -266,133 +254,6 @@ function pushBarToBuffer(symbol, interval, bar) {
   if (!arr) return;
   arr.push(bar);
   if (arr.length > max) arr.shift();
-}
-
-// ── Debug helpers (TEMPORARY) ─────────────────────────────────────────────────
-
-// Returns a human-readable reason why the W pattern failed for a given level.
-function debugWhyWFailed(bars5m, level) {
-  if (bars5m.length < 5) return `not enough bars (${bars5m.length})`;
-  const last = bars5m.at(-1);
-  if (last.close <= level) return `close(${last.close.toPrecision(6)}) <= level(${level.toPrecision(6)}) — price not above level`;
-  const searchBars = bars5m.slice(-5, -1);
-  for (let i = 0; i < searchBars.length; i++) {
-    const sweepBar = searchBars[i];
-    if (sweepBar.low >= level) continue;
-    if (last.close <= sweepBar.close) {
-      return `sweep@i=${i} low=${sweepBar.low.toPrecision(6)}<level BUT close(${last.close.toPrecision(6)}) <= sweepClose(${sweepBar.close.toPrecision(6)}) — right leg too weak`;
-    }
-    const between = searchBars.slice(i + 1);
-    if (between.length === 0) return `PASS — adjacent sweep, no neckline needed`;
-    const neckline = Math.max(...between.map(b => b.high));
-    if (last.close > neckline) return `PASS — close(${last.close.toPrecision(6)}) > neckline(${neckline.toPrecision(6)})`;
-    return `sweep@i=${i} OK BUT close(${last.close.toPrecision(6)}) <= neckline(${neckline.toPrecision(6)}) — neckline break FAILED`;
-  }
-  return `no sweep bar with low < level(${level.toPrecision(6)}) in last 4 bars`;
-}
-
-// Returns a human-readable reason why the M pattern failed for a given level.
-function debugWhyMFailed(bars5m, level) {
-  if (bars5m.length < 5) return `not enough bars (${bars5m.length})`;
-  const last = bars5m.at(-1);
-  if (last.close >= level) return `close(${last.close.toPrecision(6)}) >= level(${level.toPrecision(6)}) — price not below level`;
-  const searchBars = bars5m.slice(-5, -1);
-  for (let i = 0; i < searchBars.length; i++) {
-    const sweepBar = searchBars[i];
-    if (sweepBar.high <= level) continue;
-    if (last.close >= sweepBar.close) {
-      return `sweep@i=${i} high=${sweepBar.high.toPrecision(6)}>level BUT close(${last.close.toPrecision(6)}) >= sweepClose(${sweepBar.close.toPrecision(6)}) — right leg too weak`;
-    }
-    const between = searchBars.slice(i + 1);
-    if (between.length === 0) return `PASS — adjacent sweep, no neckline needed`;
-    const neckline = Math.min(...between.map(b => b.low));
-    if (last.close < neckline) return `PASS — close(${last.close.toPrecision(6)}) < neckline(${neckline.toPrecision(6)})`;
-    return `sweep@i=${i} OK BUT close(${last.close.toPrecision(6)}) >= neckline(${neckline.toPrecision(6)}) — neckline break FAILED`;
-  }
-  return `no sweep bar with high > level(${level.toPrecision(6)}) in last 4 bars`;
-}
-
-// Returns a human-readable explanation of divergence check for a given indicator.
-// Duplicates checkDivergence logic — debug only, does not affect production path.
-function debugDivergenceDetail(closes, indicatorName, indicatorValues, direction, minDiffRatio = 0) {
-  const WING = 5, MIN_AGO = 20, MAX_AGO = 60;
-  const n = closes.length;
-  const searchStart = Math.max(WING, n - MAX_AGO);
-  const searchEnd   = n - MIN_AGO;
-  if (searchEnd <= searchStart) return `${indicatorName}: insufficient window (n=${n}, need>${MIN_AGO + WING})`;
-
-  const highs = [], lows = [];
-  for (let i = searchStart; i < searchEnd; i++) {
-    let isH = true, isL = true;
-    for (let j = i - WING; j <= i + WING; j++) {
-      if (j < 0 || j >= n || j === i) continue;
-      if (closes[j] >= closes[i]) isH = false;
-      if (closes[j] <= closes[i]) isL = false;
-      if (!isH && !isL) break;
-    }
-    if (isH) highs.push(i);
-    if (isL)  lows.push(i);
-  }
-
-  const currentInd = indicatorValues.at(-1);
-  if (!isFinite(currentInd)) return `${indicatorName}: currentInd=${currentInd} (NaN/Inf — not enough data?)`;
-
-  if (direction === 'long') {
-    if (lows.length < 2) return `${indicatorName}: only ${lows.length} swing low(s) in window [${searchStart}..${searchEnd}) — need 2`;
-    const [i1, i2] = lows.slice(-2);
-    const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
-    if (!isFinite(v1) || !isFinite(v2)) return `${indicatorName}: pivot indic values not finite (v1=${v1} v2=${v2})`;
-    const priceDiv = closes[i2] < closes[i1];
-    const indDiv   = v2 > v1;
-    if (!priceDiv || !indDiv) {
-      return `${indicatorName}: no div — price[i1]=${closes[i1].toPrecision(6)} price[i2]=${closes[i2].toPrecision(6)} (LL=${priceDiv}) | ind[i1]=${v1.toPrecision(4)} ind[i2]=${v2.toPrecision(4)} (HL=${indDiv})`;
-    }
-    if (minDiffRatio > 0) {
-      const diff = Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1);
-      if (diff < minDiffRatio) return `${indicatorName}: div found but diff too small (${(diff * 100).toFixed(2)}% < ${(minDiffRatio * 100).toFixed(2)}%)`;
-    }
-    const between  = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
-    const neckline = Math.max(...between);
-    const pass = currentInd > neckline;
-    return `${indicatorName}: div confirmed structurally ✓ | neckline=${neckline.toPrecision(4)} currentInd=${currentInd.toPrecision(4)} → neckline break ${pass ? 'PASS ✅' : 'FAIL ❌ (current must exceed neckline)'}`;
-  } else {
-    if (highs.length < 2) return `${indicatorName}: only ${highs.length} swing high(s) in window [${searchStart}..${searchEnd}) — need 2`;
-    const [i1, i2] = highs.slice(-2);
-    const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
-    if (!isFinite(v1) || !isFinite(v2)) return `${indicatorName}: pivot indic values not finite (v1=${v1} v2=${v2})`;
-    const priceDiv = closes[i2] > closes[i1];
-    const indDiv   = v2 < v1;
-    if (!priceDiv || !indDiv) {
-      return `${indicatorName}: no div — price[i1]=${closes[i1].toPrecision(6)} price[i2]=${closes[i2].toPrecision(6)} (HH=${priceDiv}) | ind[i1]=${v1.toPrecision(4)} ind[i2]=${v2.toPrecision(4)} (LH=${indDiv})`;
-    }
-    if (minDiffRatio > 0) {
-      const diff = Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1);
-      if (diff < minDiffRatio) return `${indicatorName}: div found but diff too small (${(diff * 100).toFixed(2)}% < ${(minDiffRatio * 100).toFixed(2)}%)`;
-    }
-    const between  = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
-    const neckline = Math.min(...between);
-    const pass = currentInd < neckline;
-    return `${indicatorName}: div confirmed structurally ✓ | neckline=${neckline.toPrecision(4)} currentInd=${currentInd.toPrecision(4)} → neckline break ${pass ? 'PASS ✅' : 'FAIL ❌ (current must be below neckline)'}`;
-  }
-}
-
-// Count significant pivots (8-bar wing) in a 1H buffer.
-// Used in refreshLevels to verify enough structure exists.
-function countSigPivots1H(bars1h) {
-  const WING = 8;
-  let nHighs = 0, nLows = 0;
-  for (let i = WING; i < bars1h.length - WING; i++) {
-    let isHigh = true, isLow = true;
-    for (let j = i - WING; j <= i + WING; j++) {
-      if (j === i) continue;
-      if (bars1h[j].high >= bars1h[i].high) isHigh = false;
-      if (bars1h[j].low  <= bars1h[i].low)  isLow  = false;
-      if (!isHigh && !isLow) break;
-    }
-    if (isHigh) nHighs++;
-    if (isLow)  nLows++;
-  }
-  return { nHighs, nLows };
 }
 
 // ── W / M structure detection ─────────────────────────────────────────────────
@@ -860,70 +721,18 @@ function buildMergedAlert(symbol, direction, levelKey, rank, hasLocation, locZon
 //   Case C — SFP only, rank ≥ 2       → normal SFP alert
 //   Case A — SFU only, no SFP         → SFU-only alert
 async function detectSFP(symbol) {
-  console.log(`[SCAN] ${symbol} tick`);
   try {
     const buf = klineBuffers.get(symbol);
-    if (!buf) { console.log(`[SCAN] ${symbol} EXIT: no buffer`); return; }
+    if (!buf) return;
     const { m5, h1, h4, d1 } = buf;
-    if (m5.length < 30 || h1.length < 50) { console.log(`[SCAN] ${symbol} EXIT: insufficient bars m5=${m5.length} h1=${h1.length}`); return; }
+    if (m5.length < 30 || h1.length < 50) return;
 
     const cached = levelCache.get(symbol);
-    if (!cached || !Object.values(cached).some(v => v != null)) { console.log(`[SCAN] ${symbol} EXIT: no levels cached`); return; }
+    if (!cached || !Object.values(cached).some(v => v != null)) return;
     const levels = { ...cached, ...computeSessionLevels(h1) };
 
     // Compute SFU levels once per symbol tick (1H + 4H + 1D)
     const { sfuHigh, sfuHighTF, sfuLow, sfuLowTF } = computeSFULevels(h1, h4 ?? [], d1 ?? []);
-
-    // ── TEMPORARY verbose debug for BTC ──────────────────────────────────────
-    if (symbol === DEBUG_SYMBOL) {
-      const currentPrice = m5.at(-1)?.close;
-      console.log(`[DEBUG-BTC] ── detectSFP tick @ price=${currentPrice} ──`);
-      console.log(`[DEBUG-BTC] Buffers: m5=${m5.length} h1=${h1.length} h4=${h4?.length ?? 0} d1=${d1?.length ?? 0}`);
-      console.log(`[DEBUG-BTC] SFU levels: high=${sfuHigh?.toPrecision(6)} (${sfuHighTF}), low=${sfuLow?.toPrecision(6)} (${sfuLowTF})`);
-      // Separate level values for readability
-      const nonNullLevels = Object.entries(levels).filter(([, v]) => v != null);
-      if (nonNullLevels.length === 0) {
-        console.log(`[DEBUG-BTC] Levels: NONE (all null — levelCache empty?)`);
-      } else {
-        console.log(`[DEBUG-BTC] Levels (${nonNullLevels.length}): ` +
-          nonNullLevels.map(([k, v]) => `${k}=${v.toPrecision(6)}`).join(' | '));
-      }
-      // Check W pattern (LONG) for each long level
-      console.log(`[DEBUG-BTC] W pattern (LONG) check:`);
-      for (const key of LONG_LEVELS) {
-        const price = levels[key];
-        if (price == null) { console.log(`  ${key}: null — skipped`); continue; }
-        console.log(`  ${key}=${price.toPrecision(6)}: ${debugWhyWFailed(m5, price)}`);
-      }
-      // Check M pattern (SHORT) for each short level
-      console.log(`[DEBUG-BTC] M pattern (SHORT) check:`);
-      for (const key of SHORT_LEVELS) {
-        const price = levels[key];
-        if (price == null) { console.log(`  ${key}: null — skipped`); continue; }
-        console.log(`  ${key}=${price.toPrecision(6)}: ${debugWhyMFailed(m5, price)}`);
-      }
-      // Divergence detail for both directions
-      const closes = m5.map(b => b.close);
-      const rsiVals  = calcRSI(closes);
-      const obvVals  = calcOBV(m5);
-      const macdVals = calcMACDHistogram(closes);
-      for (const dir of ['long', 'short']) {
-        console.log(`[DEBUG-BTC] ${dir.toUpperCase()} divergence:`);
-        console.log(`  ${debugDivergenceDetail(closes, 'RSI',  rsiVals,  dir)}`);
-        console.log(`  ${debugDivergenceDetail(closes, 'OBV',  obvVals,  dir, 0.005)}`);
-        console.log(`  ${debugDivergenceDetail(closes, 'MACD', macdVals, dir)}`);
-      }
-      // SFU 2-bar check
-      const sfuLong  = detectSFU(m5, sfuHigh, sfuHighTF, sfuLow, sfuLowTF, 'long');
-      const sfuShort = detectSFU(m5, sfuHigh, sfuHighTF, sfuLow, sfuLowTF, 'short');
-      const prev = m5.at(-2), curr = m5.at(-1);
-      console.log(`[DEBUG-BTC] SFU check: prev.close=${prev?.close?.toPrecision(6)} curr.close=${curr?.close?.toPrecision(6)}`);
-      console.log(`[DEBUG-BTC]   LONG  SFU (prev<sfuLow && curr>sfuLow): ${sfuLong  ? `PASS level=${sfuLong.level}` : `FAIL (sfuLow=${sfuLow?.toPrecision(6)})`}`);
-      console.log(`[DEBUG-BTC]   SHORT SFU (prev>sfuHigh && curr<sfuHigh): ${sfuShort ? `PASS level=${sfuShort.level}` : `FAIL (sfuHigh=${sfuHigh?.toPrecision(6)})`}`);
-      // Dedup status
-      console.log(`[DEBUG-BTC] Dedup: sfp_long=${wasAlertedRecently(symbol,'long')} sfp_short=${wasAlertedRecently(symbol,'short')} sfu_long=${wasAlertedSFURecently(symbol,'long')} sfu_short=${wasAlertedSFURecently(symbol,'short')}`);
-    }
-    // ─────────────────────────────────────────────────────────────────────────
 
     for (const direction of ['long', 'short']) {
       const sfpAlerted = wasAlertedRecently(symbol, direction);
@@ -1065,9 +874,6 @@ function handleMessage(raw) {
         if (isFinite(closedBar.close) && closedBar.close > 0) {
           pushBarToBuffer(symbol, interval, closedBar);
           if (interval === 'Min5') {
-            if (symbol === DEBUG_SYMBOL) {
-              console.log(`[DEBUG-BTC] 5m close: ${closedBar.close} | h=${closedBar.high} l=${closedBar.low} v=${closedBar.vol.toFixed(0)} @ ${new Date(closedBar.time * 1000).toISOString()}`);
-            }
             candleCloseCount++;
             if (candleCloseCount % 50 === 0) {
               console.log(`[scanner] ✓ ${candleCloseCount} candle closes processed (latest: ${symbol})`);
