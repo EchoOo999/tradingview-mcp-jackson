@@ -188,7 +188,7 @@ async function bootstrapKlines(symbols) {
       const [raw5m, raw1h, raw4h, rawD1, rawW1, rawMo] = await Promise.all([
         restGet(`/api/v1/contract/kline/${symbol}?interval=Min5&limit=${BOOTSTRAP_5M}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Min60&limit=${BOOTSTRAP_1H}`),
-        restGet(`/api/v1/contract/kline/${symbol}?interval=Min240&limit=${BOOTSTRAP_4H}`),
+        restGet(`/api/v1/contract/kline/${symbol}?interval=Hour4&limit=${BOOTSTRAP_4H}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Day1&limit=${BOOTSTRAP_D1}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Week1&limit=${BOOTSTRAP_W1}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Month1&limit=${BOOTSTRAP_MO}`),
@@ -212,7 +212,7 @@ async function bootstrapKlines(symbols) {
       klineBuffers.set(symbol, { m5: [], h1: [], h4: [], d1: [] });
       levelCache.set(symbol, {});
     }
-    await sleep(400);   // ~2.5 symbols/s — safely under MEXC 20 req/s limit
+    await sleep(800);   // ~1.25 symbols/s — back off to avoid MEXC rate limit (code 510)
   }
   console.log(`[scanner] Bootstrap done: ${ok}/${symbols.length} symbols`);
 }
@@ -248,7 +248,7 @@ async function refreshLevels() {
     } catch (err) {
       console.error(`[scanner] Level refresh ${symbol}: ${err.message}`);
     }
-    await sleep(300);
+    await sleep(600);
   }
   console.log(`[scanner] Level refresh done: ${ok}/${topSymbols.length}`);
 }
@@ -260,7 +260,7 @@ function pushBarToBuffer(symbol, interval, bar) {
   let arr, max;
   if      (interval === 'Min5')   { arr = buf.m5; max = BUFFER_MAX_5M; }
   else if (interval === 'Min60')  { arr = buf.h1; max = BUFFER_MAX_1H; }
-  else if (interval === 'Min240') { arr = buf.h4; max = BUFFER_MAX_4H; }
+  else if (interval === 'Hour4')  { arr = buf.h4; max = BUFFER_MAX_4H; }
   else if (interval === 'Day1')   { arr = buf.d1; max = BUFFER_MAX_1D; }
   else return;
   if (!arr) return;
@@ -1018,7 +1018,7 @@ function subscribeSymbols(symbols) {
   for (const symbol of symbols) {
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'   } });
     wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60'  } });
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min240' } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Hour4'  } });
     // Day1 intentionally omitted — MEXC WS does not reliably support Day1 kline
     // subscriptions; d1 buffer is refreshed via hourly REST in refreshLevels.
   }
@@ -1029,7 +1029,7 @@ function unsubscribeSymbols(symbols) {
   for (const symbol of symbols) {
     wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'   } });
     wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60'  } });
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min240' } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Hour4'  } });
   }
 }
 
@@ -1044,7 +1044,7 @@ function handleMessage(raw) {
   if (channel === 'push.kline') {
     if (!symbol || !data) return;
     const interval = data.interval;
-    if (interval !== 'Min5' && interval !== 'Min60' && interval !== 'Min240') return;
+    if (interval !== 'Min5' && interval !== 'Min60' && interval !== 'Hour4') return;
 
     const t    = data.t;
     const key  = `${symbol}:${interval}`;
