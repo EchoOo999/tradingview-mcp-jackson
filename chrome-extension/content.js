@@ -12,6 +12,13 @@
   // ─── Symbol Detection ──────────────────────────────────────────────────────
 
   function getRawSymbol() {
+    // Primary: TV Desktop chart API — document.title is always the generic
+    // TradingView homepage title on Desktop and never contains the symbol.
+    try {
+      const sym = window.TradingViewApi._activeChartWidgetWV.value().symbol();
+      if (sym && sym.length > 2) return sym.split(':').pop(); // 'MEXC:BTCUSDT.P' → 'BTCUSDT.P'
+    } catch (_) {}
+
     try {
       const s = new URLSearchParams(window.location.search).get('symbol');
       if (s) return s.split(':').pop().trim();
@@ -121,6 +128,7 @@
       <span id="msp-title">MEXC Scalp</span>
       <span id="msp-symbol-badge" title="Click to refresh symbol">—</span>
       <button id="msp-minimize" title="Collapse">−</button>
+      <button id="msp-close"    title="Close">×</button>
     </div>
     <div id="msp-body">
 
@@ -454,7 +462,7 @@
   document.getElementById('msp-margin-toggle').addEventListener('change', updatePreview);
 
   // Fallback: re-run every second so any missed event still updates
-  setInterval(updatePreview, 1000);
+  const previewInterval = setInterval(updatePreview, 1000);
   setTimeout(updatePreview, 100);
 
   // ─── Symbol Badge ──────────────────────────────────────────────────────────
@@ -472,17 +480,9 @@
 
   refreshSymbol();
   badge.addEventListener('click', refreshSymbol);
-
-  let lastHref = location.href;
-  setInterval(() => {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
-      setTimeout(refreshSymbol, 600);
-    }
-  }, 500);
-
-  const titleEl = document.querySelector('title');
-  if (titleEl) new MutationObserver(refreshSymbol).observe(titleEl, { childList: true });
+  // Poll every 2s — TV Desktop title is always the generic homepage string,
+  // so we rely entirely on the chart API which changes on pane/symbol switch.
+  setInterval(refreshSymbol, 2000);
 
   // ─── Draggable ─────────────────────────────────────────────────────────────
 
@@ -490,7 +490,7 @@
   const header = document.getElementById('msp-header');
 
   header.addEventListener('mousedown', (e) => {
-    if (e.target.id === 'msp-minimize') return;
+    if (e.target.closest('#msp-minimize, #msp-close')) return;
     dragging = true;
     const r = panel.getBoundingClientRect();
     ox = e.clientX - r.left;
@@ -507,12 +507,36 @@
 
   document.addEventListener('mouseup', () => { dragging = false; });
 
-  // ─── Collapse / Expand ─────────────────────────────────────────────────────
+  // ─── Collapse / Expand / Close ─────────────────────────────────────────────
 
   const minimizeBtn = document.getElementById('msp-minimize');
-  minimizeBtn.addEventListener('click', () => {
+  minimizeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
     panel.classList.toggle('collapsed');
     minimizeBtn.textContent = panel.classList.contains('collapsed') ? '+' : '−';
+  });
+
+  // ─── Floating Reopen Button ────────────────────────────────────────────────
+  // Always visible at bottom-right. Restores the panel when it is collapsed
+  // or hidden. Panel is never fully destroyed — just collapsed.
+  const reopenBtn = document.createElement('div');
+  reopenBtn.id    = 'msp-reopen-btn';
+  reopenBtn.textContent = 'MS';
+  reopenBtn.title = 'Open MEXC Scalp Panel';
+  document.body.appendChild(reopenBtn);
+
+  reopenBtn.addEventListener('click', () => {
+    panel.style.display = '';
+    panel.classList.remove('collapsed');
+    minimizeBtn.textContent = '−';
+  });
+
+  const closeBtn = document.getElementById('msp-close');
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Collapse rather than destroy — use the MS button at bottom-right to restore
+    panel.classList.add('collapsed');
+    minimizeBtn.textContent = '+';
   });
 
   // ─── Status Helper ─────────────────────────────────────────────────────────
@@ -555,7 +579,7 @@
   }
 
   fetchBalance();
-  setInterval(fetchBalance, 10000);
+  const balanceInterval = setInterval(fetchBalance, 10000);
 
   // ─── Order Execution ───────────────────────────────────────────────────────
 

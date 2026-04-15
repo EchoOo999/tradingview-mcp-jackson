@@ -57,7 +57,8 @@
   background: rgba(240, 185, 11, 0.2);
 }
 
-#msp-minimize {
+#msp-minimize,
+#msp-close {
   background: none;
   border: none;
   color: #787b86;
@@ -70,6 +71,8 @@
 }
 
 #msp-minimize:hover { color: #d1d4dc; }
+#msp-close { font-size: 18px; }
+#msp-close:hover { color: #f23645; }
 
 /* ── Body ── */
 
@@ -480,3 +483,33 @@
 
 #mexc-scalp-panel.collapsed #msp-body { display: none; }
 #mexc-scalp-panel.collapsed { border-radius: 10px; }
+
+/* ── Reopen Button ── */
+
+#msp-reopen-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 34px;
+  height: 34px;
+  background: #131722;
+  border: 1.5px solid #f0b90b;
+  border-radius: 7px;
+  color: #f0b90b;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  z-index: 9999998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(240, 185, 11, 0.1);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+#msp-reopen-btn:hover {
+  background: #1e2130;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(240, 185, 11, 0.3);
+}

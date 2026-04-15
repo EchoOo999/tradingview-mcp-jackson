@@ -1,29 +1,51 @@
 @echo off
-setlocal
+REM ─────────────────────────────────────────────────────────────────────────────
+REM  MEXC Scalp Panel — One-click desktop launcher
+REM
+REM  1. Kills any running inject_panel.mjs (releases port 9224)
+REM  2. Kills TradingView and relaunches it with CDP on port 9222
+REM  3. Starts inject_panel.mjs — it polls until TV is ready, then injects.
+REM     It also reconnects automatically if TV restarts later.
+REM ─────────────────────────────────────────────────────────────────────────────
 
-echo ============================================
-echo  MEXC Scalp Panel ^— TradingView Desktop
-echo ============================================
+echo.
+echo  MEXC Scalp Panel ^| TradingView Desktop
+echo  ─────────────────────────────────────────
 echo.
 
-:: Step 1 — Launch TradingView with CDP enabled
-echo [1/3] Launching TradingView Desktop with CDP...
-cscript //nologo "%~dp0launch_tv_debug.vbs"
+REM ── Step 1: Release port 9224 (kill old injector if running) ─────────────────
+echo [1/3] Releasing port 9224...
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":9224 "') do (
+    taskkill /F /PID %%p >nul 2>&1
+)
 
-:: Step 2 — Wait for TradingView to fully load
-echo [2/3] Waiting for TradingView to load (10s)...
-timeout /t 10 /nokey >nul
+REM ── Step 2: Launch TradingView with CDP ──────────────────────────────────────
+echo [2/3] Launching TradingView with CDP...
+powershell -NoProfile -Command ^
+  "Stop-Process -Name TradingView -Force -ErrorAction SilentlyContinue; ^
+   Start-Sleep 1; ^
+   $pkg = Get-AppxPackage -Name 'TradingView.Desktop' | Select-Object -First 1; ^
+   if (-not $pkg) { Write-Error 'TradingView Store app not found'; exit 1 }; ^
+   $exe = Join-Path $pkg.InstallLocation 'TradingView.exe'; ^
+   Start-Process $exe -ArgumentList '--remote-debugging-port=9222'; ^
+   Write-Host 'TradingView launched.'"
+if %errorlevel% neq 0 (
+    echo.
+    echo  ERROR: Could not launch TradingView.
+    echo  Make sure it is installed from the Microsoft Store.
+    pause
+    exit /b 1
+)
 
-:: Step 3 — Inject panel
-echo [3/3] Injecting MEXC Scalp Panel...
+REM ── Step 3: Start injector (polls for TV, no fixed wait needed) ──────────────
+echo [3/3] Starting panel injector...
 echo.
-echo  Panel:  floating trading panel (top-right corner)
-echo  Search: Ctrl+F to search MEXC perpetuals
+echo  Panel:  floating trading panel ^(top-right^)
+echo  Search: Ctrl+F to search 760 MEXC perpetuals
 echo  Bridge: http://localhost:9224
+echo  Auto-reconnect: yes ^(survives TV restarts^)
 echo.
-echo Press Ctrl+C to stop the panel.
+echo  Press Ctrl+C to stop.
 echo.
 
 node "%~dp0inject_panel.mjs"
-
-endlocal

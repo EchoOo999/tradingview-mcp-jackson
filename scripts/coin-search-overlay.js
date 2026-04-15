@@ -224,8 +224,9 @@
 
   // ── Keyboard events ──────────────────────────────────────────────────────────
 
-  // Capture phase — intercept before TV's own handlers
-  document.addEventListener('keydown', e => {
+  // window capture fires before document capture — intercepts Ctrl+F even if
+  // TradingView has its own document-level capture listener registered first.
+  window.addEventListener('keydown', e => {
     if (e.ctrlKey && e.key === 'f') {
       e.preventDefault();
       e.stopImmediatePropagation();
