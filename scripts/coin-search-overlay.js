@@ -25,14 +25,22 @@
   let selIdx     = 0;
 
   // ── Read watchlist from TV DOM ───────────────────────────────────────────────
+  // Try multiple selectors to catch symbols across all groups/tabs
   function loadWatchlistSymbols() {
-    const nodes = document.querySelectorAll('[data-symbol-full]');
-    if (!nodes.length) return [];
-    return Array.from(nodes).map(el => {
-      const tvSymbol = el.getAttribute('data-symbol-full') || '';
-      const display  = tvSymbol.split(':').pop();
-      return { display, tvSymbol };
-    });
+    const seen = new Set();
+    const results = [];
+
+    // Primary: data-symbol-full (visible rows)
+    // Secondary: data-field="symbol" (collapsed groups, alternate markup)
+    const nodes = document.querySelectorAll('[data-symbol-full], [data-field="symbol"]');
+    for (const el of nodes) {
+      const tvSymbol = el.getAttribute('data-symbol-full') || el.textContent.trim();
+      if (!tvSymbol || !tvSymbol.includes(':')) continue;
+      if (seen.has(tvSymbol)) continue;
+      seen.add(tvSymbol);
+      results.push({ display: tvSymbol.split(':').pop(), tvSymbol });
+    }
+    return results;
   }
 
   // ── DOM ─────────────────────────────────────────────────────────────────────
@@ -194,6 +202,9 @@
   async function pick(item) {
     const sym         = item.tvSymbol;
     const displayName = item.display;
+
+    // ── DEBUG: confirm click is firing ───────────────────────────────────────
+    window.alert('[coin-search] click registered: ' + sym);
 
     // Immediate visual feedback — keep overlay open
     input.value       = '';

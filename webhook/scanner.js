@@ -813,13 +813,15 @@ async function detectSFP(symbol) {
     const levels = { ...cached, ...computeSessionLevels(h1) };
 
     // Compute SFU levels once per symbol tick (1H + 4H + 1D)
-    const sfuLevels = computeSFULevels(h1, h4 ?? [], d1 ?? []);
+    // SFU alerts are restricted to BTC, ETH, SOL only
+    const SFU_SYMBOLS = new Set(['BTC_USDT', 'ETH_USDT', 'SOL_USDT']);
+    const sfuLevels = SFU_SYMBOLS.has(symbol) ? computeSFULevels(h1, h4 ?? [], d1 ?? []) : null;
 
     for (const direction of ['long', 'short']) {
       const sfuAlerted = wasAlertedSFURecently(symbol, direction);
 
-      // Detect SFU regardless of SFP dedup (SFU has its own dedup key)
-      const sfuResult = (!sfuAlerted)
+      // Detect SFU only for whitelisted symbols
+      const sfuResult = (sfuLevels && !sfuAlerted)
         ? detectSFU(m5, sfuLevels, direction)
         : null;
 
