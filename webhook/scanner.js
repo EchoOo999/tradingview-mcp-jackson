@@ -617,9 +617,15 @@ function calcRank(hasLocation, hasOBV, hasRSI, hasMACD) {
   return 1 + ((hasLocation ? 8 : 0) | (hasOBV ? 4 : 0) | (hasRSI ? 2 : 0) | (hasMACD ? 1 : 0));
 }
 
+// ── Symbol display name overrides ─────────────────────────────────────────────
+const SYMBOL_DISPLAY_NAMES = {
+  'TRUMPOFFICIAL_USDT': 'TRUMP',
+  'BIANRENSHENG_USDT':  '币安人生',
+};
+
 // ── Alert builder ─────────────────────────────────────────────────────────────
 function buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
-  const coin     = symbol.replace('_USDT', '');
+  const coin     = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
   const dirEmoji = direction === 'long' ? '🟢' : '🔴';
   const time     = new Date().toISOString().slice(11, 16) + ' UTC';
@@ -741,7 +747,7 @@ function detectSFU(bars5m, sfuHigh, sfuHighTF, sfuLow, sfuLowTF, direction) {
 // sfuResult = { level, tf }  (tf = "1H" | "4H" | "1D")
 // Case A: SFU detected, no SFP
 function buildSFUAlert(symbol, direction, sfuResult, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
-  const coin     = symbol.replace('_USDT', '');
+  const coin     = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
   const dirEmoji = direction === 'long' ? '🟢' : '🔴';
   const side     = direction === 'long' ? 'Low' : 'High';
@@ -758,7 +764,7 @@ function buildSFUAlert(symbol, direction, sfuResult, hasLocation, locZone, hasOB
 
 // Case B: SFU + SFP both confirmed — merged alert
 function buildMergedAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult) {
-  const coin     = symbol.replace('_USDT', '');
+  const coin     = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
   const dirEmoji = direction === 'long' ? '🟢' : '🔴';
   const sfpStr   = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';

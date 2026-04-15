@@ -173,6 +173,7 @@ export async function launch({ port, kill_existing } = {}) {
       `${process.env.LOCALAPPDATA}\\TradingView\\TradingView.exe`,
       `${process.env.PROGRAMFILES}\\TradingView\\TradingView.exe`,
       `${process.env['PROGRAMFILES(X86)']}\\TradingView\\TradingView.exe`,
+      // Windows Store (MSIX) install — resolved via Get-AppxPackage below
     ],
     linux: [
       '/opt/TradingView/tradingview',
@@ -194,6 +195,23 @@ export async function launch({ port, kill_existing } = {}) {
       const cmd = platform === 'win32' ? 'where TradingView.exe' : 'which tradingview';
       tvPath = execSync(cmd, { timeout: 3000 }).toString().trim().split('\n')[0];
       if (tvPath && !existsSync(tvPath)) tvPath = null;
+    } catch { /* ignore */ }
+  }
+
+  // Windows Store (MSIX) fallback — use Get-AppxPackage to resolve the
+  // WindowsApps path without needing elevated filesystem access.
+  if (!tvPath && platform === 'win32') {
+    try {
+      const ps = execSync(
+        'powershell -NoProfile -Command "(Get-AppxPackage -Name \'TradingView.Desktop\' | Select-Object -First 1).InstallLocation"',
+        { timeout: 8000 }
+      ).toString().trim();
+      if (ps) {
+        const candidate = `${ps}\\TradingView.exe`;
+        // Can't existsSync a WindowsApps path, but if Get-AppxPackage returned
+        // a location the exe is there — proceed directly.
+        tvPath = candidate;
+      }
     } catch { /* ignore */ }
   }
 

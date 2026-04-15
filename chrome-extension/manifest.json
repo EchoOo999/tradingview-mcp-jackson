@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "MEXC Scalp Panel",
+  "version": "1.0",
+  "description": "Floating MEXC Futures order panel injected into TradingView",
+  "permissions": [],
+  "host_permissions": [
+    "https://mexc-webhook-production.up.railway.app/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.tradingview.com/*",
+        "https://tradingview.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
