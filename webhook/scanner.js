@@ -696,49 +696,64 @@ function computeSessionLevels(h1Bars) {
 }
 
 // ── SFU level computation ─────────────────────────────────────────────────────
-// SFU (Swing Failure Unit): two consecutive 5m closes — bar N closes through a
-// 1H/4H/1D extreme, bar N+1 closes back. The extreme is the highest visible
-// high / lowest visible low across all three timeframes — retail stop cluster.
-// Returns the most significant level AND which TF it came from.
+// Find the most recent confirmed swing high in a bar array.
+// WING bars on each side must all have a strictly lower high.
+function nearestSwingHigh(bars, wing = 2) {
+  const n = bars.length;
+  for (let i = n - 1 - wing; i >= wing; i--) {
+    let ok = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j !== i && bars[j].high >= bars[i].high) { ok = false; break; }
+    }
+    if (ok) return bars[i].high;
+  }
+  return null;
+}
+
+// Find the most recent confirmed swing low in a bar array.
+function nearestSwingLow(bars, wing = 2) {
+  const n = bars.length;
+  for (let i = n - 1 - wing; i >= wing; i--) {
+    let ok = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j !== i && bars[j].low <= bars[i].low) { ok = false; break; }
+    }
+    if (ok) return bars[i].low;
+  }
+  return null;
+}
+
+// Returns nearest swing pivot high/low for each of the three HTFs.
 function computeSFULevels(bars1h, bars4h, bars1d) {
-  const h1High = bars1h.length ? Math.max(...bars1h.slice(-100).map(b => b.high).filter(isFinite)) : -Infinity;
-  const h4High = bars4h.length ? Math.max(...bars4h.slice(-100).map(b => b.high).filter(isFinite)) : -Infinity;
-  const d1High = bars1d.length ? Math.max(...bars1d.slice(-100).map(b => b.high).filter(isFinite)) : -Infinity;
-
-  const h1Low  = bars1h.length ? Math.min(...bars1h.slice(-100).map(b => b.low).filter(isFinite)) : Infinity;
-  const h4Low  = bars4h.length ? Math.min(...bars4h.slice(-100).map(b => b.low).filter(isFinite)) : Infinity;
-  const d1Low  = bars1d.length ? Math.min(...bars1d.slice(-100).map(b => b.low).filter(isFinite)) : Infinity;
-
-  const sfuHigh   = Math.max(h1High, h4High, d1High);
-  const sfuHighTF = sfuHigh === d1High ? '1D' : sfuHigh === h4High ? '4H' : '1H';
-
-  const sfuLow    = Math.min(h1Low, h4Low, d1Low);
-  const sfuLowTF  = sfuLow === d1Low  ? '1D' : sfuLow  === h4Low  ? '4H' : '1H';
-
   return {
-    sfuHigh:   isFinite(sfuHigh) ? sfuHigh   : null,
-    sfuHighTF: isFinite(sfuHigh) ? sfuHighTF : null,
-    sfuLow:    isFinite(sfuLow)  ? sfuLow    : null,
-    sfuLowTF:  isFinite(sfuLow)  ? sfuLowTF  : null,
+    h1High: bars1h.length >= 5 ? nearestSwingHigh(bars1h) : null,
+    h4High: bars4h.length >= 5 ? nearestSwingHigh(bars4h) : null,
+    d1High: bars1d.length >= 5 ? nearestSwingHigh(bars1d) : null,
+    h1Low:  bars1h.length >= 5 ? nearestSwingLow(bars1h)  : null,
+    h4Low:  bars4h.length >= 5 ? nearestSwingLow(bars4h)  : null,
+    d1Low:  bars1d.length >= 5 ? nearestSwingLow(bars1d)  : null,
   };
 }
 
-// Returns { level, tf } when a 2-bar SFU sequence is detected on the last two
-// closed 5m bars. Bar N closes through the level, bar N+1 closes back.
-function detectSFU(bars5m, sfuHigh, sfuHighTF, sfuLow, sfuLowTF, direction) {
-  if (bars5m.length < 2) return null;
-  const prev = bars5m.at(-2);
+// Returns { level, tf } when the current 5m bar's WICK sweeps a swing pivot
+// and the CLOSE comes back inside — exact wick tip sweep, not a body touch.
+//   SHORT SFU: curr.high > pivot high  &&  curr.close < pivot high
+//   LONG  SFU: curr.low  < pivot low   &&  curr.close > pivot low
+// Checks all three HTFs; priority order 1D → 4H → 1H.
+function detectSFU(bars5m, sfuLevels, direction) {
+  if (bars5m.length < 1) return null;
   const curr = bars5m.at(-1);
+  const { h1High, h4High, d1High, h1Low, h4Low, d1Low } = sfuLevels;
 
-  if (direction === 'long' && sfuLow != null) {
-    if (prev.close < sfuLow && curr.close > sfuLow) {
-      return { level: sfuLow, tf: sfuLowTF };
-    }
+  if (direction === 'short') {
+    if (d1High != null && curr.high > d1High && curr.close < d1High) return { level: d1High, tf: '1D' };
+    if (h4High != null && curr.high > h4High && curr.close < h4High) return { level: h4High, tf: '4H' };
+    if (h1High != null && curr.high > h1High && curr.close < h1High) return { level: h1High, tf: '1H' };
   }
-  if (direction === 'short' && sfuHigh != null) {
-    if (prev.close > sfuHigh && curr.close < sfuHigh) {
-      return { level: sfuHigh, tf: sfuHighTF };
-    }
+  if (direction === 'long') {
+    if (d1Low  != null && curr.low  < d1Low  && curr.close > d1Low)  return { level: d1Low,  tf: '1D' };
+    if (h4Low  != null && curr.low  < h4Low  && curr.close > h4Low)  return { level: h4Low,  tf: '4H' };
+    if (h1Low  != null && curr.low  < h1Low  && curr.close > h1Low)  return { level: h1Low,  tf: '1H' };
   }
   return null;
 }
@@ -798,14 +813,14 @@ async function detectSFP(symbol) {
     const levels = { ...cached, ...computeSessionLevels(h1) };
 
     // Compute SFU levels once per symbol tick (1H + 4H + 1D)
-    const { sfuHigh, sfuHighTF, sfuLow, sfuLowTF } = computeSFULevels(h1, h4 ?? [], d1 ?? []);
+    const sfuLevels = computeSFULevels(h1, h4 ?? [], d1 ?? []);
 
     for (const direction of ['long', 'short']) {
       const sfuAlerted = wasAlertedSFURecently(symbol, direction);
 
       // Detect SFU regardless of SFP dedup (SFU has its own dedup key)
       const sfuResult = (!sfuAlerted)
-        ? detectSFU(m5, sfuHigh, sfuHighTF, sfuLow, sfuLowTF, direction)
+        ? detectSFU(m5, sfuLevels, direction)
         : null;
 
       // Find sweep level, then apply per-level dedup (session=4H, structural=8H)
