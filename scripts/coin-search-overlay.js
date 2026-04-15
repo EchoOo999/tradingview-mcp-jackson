@@ -1,19 +1,17 @@
 /**
- * MEXC Coin Search Overlay — injected into TradingView Desktop renderer
+ * Watchlist Symbol Search Overlay — injected into TradingView Desktop renderer
  *
- * Press Ctrl+F  → open search
- * Type          → filter MEXC perpetuals in real-time
+ * Press Ctrl+F  → open search (reads your TV watchlist live from the DOM)
+ * Type          → filter in real-time
  * ↑ / ↓        → navigate results
- * Enter / click → switch active chart to selected symbol (MEXC:BTCUSDT.P format)
+ * Enter / click → switch active chart to selected symbol via bridge (localhost:9224)
  * Esc           → close
  * Click outside → close
  *
- * Symbol list is pre-loaded by inject_panel.mjs into window.__mexcSymbols
- * (fetched server-side to avoid TV's CSP restrictions).
- * Each entry: { display: 'BTC', mexcSymbol: 'BTC_USDT', tvSymbol: 'MEXC:BTCUSDT.P' }
+ * Symbol list: read from TV watchlist DOM [data-symbol-full] on every open.
+ * Works with any symbol — ES, NQ, Oil, MEXC perps, anything in the watchlist.
  *
  * Symbol switch: POST { symbol: tvSymbol } → localhost:9224/set-symbol
- * Bridge calls chart.setSymbol(tvSymbol) — TV auto-highlights watchlist entry.
  */
 (function () {
   'use strict';
@@ -22,11 +20,20 @@
 
   const BRIDGE = 'http://localhost:9224';
 
-  // ── Symbol list — injected by Node before this script runs ─────────────────
-  // window.__mexcSymbols: Array<{ display, mexcSymbol, tvSymbol }>
-  let allSymbols = Array.isArray(window.__mexcSymbols) ? window.__mexcSymbols : [];
+  let allSymbols = [];
   let filtered   = [];
   let selIdx     = 0;
+
+  // ── Read watchlist from TV DOM ───────────────────────────────────────────────
+  function loadWatchlistSymbols() {
+    const nodes = document.querySelectorAll('[data-symbol-full]');
+    if (!nodes.length) return [];
+    return Array.from(nodes).map(el => {
+      const tvSymbol = el.getAttribute('data-symbol-full') || '';
+      const display  = tvSymbol.split(':').pop();
+      return { display, tvSymbol };
+    });
+  }
 
   // ── DOM ─────────────────────────────────────────────────────────────────────
 
@@ -57,42 +64,35 @@
     boxShadow:     '0 12px 40px rgba(0,0,0,0.55)',
   });
 
-  // Header — shows symbol count + current chart symbol
+  // Header — symbol count + current chart symbol
   const header = document.createElement('div');
   Object.assign(header.style, {
-    padding:       '10px 16px 6px',
-    color:         '#787b86',
-    fontSize:      '11px',
-    letterSpacing: '0.5px',
-    textTransform: 'uppercase',
-    display:       'flex',
-    justifyContent:'space-between',
-    alignItems:    'center',
+    padding:        '10px 16px 6px',
+    color:          '#787b86',
+    fontSize:       '11px',
+    letterSpacing:  '0.5px',
+    textTransform:  'uppercase',
+    display:        'flex',
+    justifyContent: 'space-between',
+    alignItems:     'center',
   });
 
   const headerLeft  = document.createElement('span');
-  headerLeft.textContent = `MEXC Perpetuals (${allSymbols.length})`;
-
   const headerRight = document.createElement('span');
   Object.assign(headerRight.style, { color: '#f0b90b', fontWeight: '600' });
-
   header.appendChild(headerLeft);
   header.appendChild(headerRight);
 
-  // Update current symbol badge whenever the overlay opens
-  function refreshCurrentSymbol() {
+  function refreshHeader() {
+    headerLeft.textContent = `Watchlist (${allSymbols.length})`;
     try {
       const sym = window.TradingViewApi._activeChartWidgetWV.value().symbol();
-      // MEXC:BTCUSDT.P  →  show just "BTCUSDT.P" to keep it short
-      headerRight.textContent = sym ? sym.replace('MEXC:', '') : '';
+      headerRight.textContent = sym ? sym.replace(/^[^:]+:/, '') : '';
     } catch { headerRight.textContent = ''; }
   }
 
   const input = document.createElement('input');
   input.type         = 'text';
-  input.placeholder  = allSymbols.length
-    ? 'Search coin  (BTC, SOL, DOGE…)'
-    : 'Symbol list not loaded — restart inject_panel.mjs';
   input.autocomplete = 'off';
   input.spellcheck   = false;
   Object.assign(input.style, {
@@ -105,7 +105,12 @@
     outline:      'none',
     width:        '100%',
     boxSizing:    'border-box',
+    transition:   'color 0.15s',
   });
+
+  function setInputPlaceholder(text) {
+    input.placeholder = text;
+  }
 
   const list = document.createElement('div');
   Object.assign(list.style, { overflowY: 'auto', flex: '1' });
@@ -124,7 +129,7 @@
     if (!allSymbols.length) {
       const msg = document.createElement('div');
       Object.assign(msg.style, { padding: '16px', color: '#787b86', fontSize: '13px' });
-      msg.textContent = 'No symbols — restart inject_panel.mjs to reload';
+      msg.textContent = 'No watchlist symbols found — add symbols to your TV watchlist';
       list.appendChild(msg);
       return;
     }
@@ -173,11 +178,11 @@
       filtered = allSymbols.slice(0, 60);
     } else {
       filtered = allSymbols
-        .filter(s => s.display.startsWith(q) || s.display.includes(q))
+        .filter(s => s.display.toUpperCase().includes(q) || s.tvSymbol.toUpperCase().includes(q))
         .sort((a, b) => {
-          const aExact = a.display.startsWith(q) ? 0 : 1;
-          const bExact = b.display.startsWith(q) ? 0 : 1;
-          return aExact - bExact || a.display.localeCompare(b.display);
+          const aStart = a.display.toUpperCase().startsWith(q) ? 0 : 1;
+          const bStart = b.display.toUpperCase().startsWith(q) ? 0 : 1;
+          return aStart - bStart || a.display.localeCompare(b.display);
         });
     }
     selIdx = 0;
@@ -187,9 +192,14 @@
   // ── Symbol selection ────────────────────────────────────────────────────────
 
   async function pick(item) {
-    hide();
+    const sym         = item.tvSymbol;
+    const displayName = item.display;
 
-    const sym = item.tvSymbol;
+    // Immediate visual feedback — keep overlay open
+    input.value       = '';
+    input.style.color = '#f0b90b';
+    setInputPlaceholder(`Switching to ${displayName}…`);
+    list.innerHTML    = '';
 
     try {
       const res = await fetch(`${BRIDGE}/set-symbol`, {
@@ -199,20 +209,32 @@
       });
       if (res.ok) {
         console.log('[coin-search] ✓ Switched →', sym);
+        input.style.color = '#089981';
+        setInputPlaceholder(`✓ Switched to ${displayName}`);
+        setTimeout(hide, 700);
         return;
       }
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `HTTP ${res.status}`);
     } catch (e) {
       console.error('[coin-search] Bridge error for', sym, ':', e.message);
-      alert(`MEXC coin search: could not switch symbol.\n\n${e.message}\n\nMake sure inject_panel.mjs is running.`);
+      input.style.color = '#f23645';
+      setInputPlaceholder(`✗ ${e.message} — is inject_panel.mjs running?`);
+      setTimeout(() => {
+        input.style.color = '#d1d4dc';
+        setInputPlaceholder('Search symbol…');
+        applyFilter('');
+      }, 3000);
     }
   }
 
   // ── Show / hide ─────────────────────────────────────────────────────────────
 
   function show() {
-    refreshCurrentSymbol();
+    allSymbols = loadWatchlistSymbols();
+    refreshHeader();
+    setInputPlaceholder(allSymbols.length ? 'Search symbol…' : 'No watchlist symbols found');
+    input.style.color = '#d1d4dc';
     overlay.style.display = 'flex';
     input.value = '';
     applyFilter('');
@@ -221,15 +243,14 @@
 
   function hide() {
     overlay.style.display = 'none';
-    input.value = '';
+    input.value       = '';
+    input.style.color = '#d1d4dc';
   }
 
   function isOpen() { return overlay.style.display !== 'none'; }
 
-  // ── Keyboard events ──────────────────────────────────────────────────────────
+  // ── Keyboard ─────────────────────────────────────────────────────────────────
 
-  // window capture fires before document capture — intercepts Ctrl+F even if
-  // TradingView has its own document-level capture listener registered first.
   window.addEventListener('keydown', e => {
     if (e.ctrlKey && e.key === 'f') {
       e.preventDefault();
@@ -263,5 +284,5 @@
     if (e.target === overlay) hide();
   });
 
-  console.log(`[coin-search] Ready — ${allSymbols.length} symbols loaded. Ctrl+F to search.`);
+  console.log('[coin-search] Ready — Ctrl+F to search your watchlist.');
 })();
