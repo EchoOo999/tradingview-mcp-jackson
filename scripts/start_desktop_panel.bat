@@ -30,15 +30,8 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM ── Step 3: Start injector (polls for TV, no fixed wait needed) ──────────────
-echo [3/3] Starting panel injector...
-echo.
-echo  Panel:  floating trading panel ^(top-right^)
-echo  Search: Ctrl+F to search 760 MEXC perpetuals
-echo  Bridge: http://localhost:9224
-echo  Auto-reconnect: yes ^(survives TV restarts^)
-echo.
-echo  Press Ctrl+C to stop.
-echo.
-
-node "%~dp0inject_panel.mjs"
+REM ── Step 3: Start injector minimized in background ──────────────────────────
+echo [3/3] Starting panel injector (minimized)...
+start /min "inject_panel" node "%~dp0inject_panel.mjs"
+echo  Done. Injector running in background.
+echo  To stop: taskkill /F /IM node.exe
