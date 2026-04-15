@@ -21,14 +21,7 @@ for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":9224 "') do (
 
 REM ── Step 2: Launch TradingView with CDP ──────────────────────────────────────
 echo [2/3] Launching TradingView with CDP...
-powershell -NoProfile -Command ^
-  "Stop-Process -Name TradingView -Force -ErrorAction SilentlyContinue; ^
-   Start-Sleep 1; ^
-   $pkg = Get-AppxPackage -Name 'TradingView.Desktop' | Select-Object -First 1; ^
-   if (-not $pkg) { Write-Error 'TradingView Store app not found'; exit 1 }; ^
-   $exe = Join-Path $pkg.InstallLocation 'TradingView.exe'; ^
-   Start-Process $exe -ArgumentList '--remote-debugging-port=9222'; ^
-   Write-Host 'TradingView launched.'"
+powershell -NoProfile -Command "Stop-Process -Name TradingView -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; $pkg = Get-AppxPackage -Name 'TradingView.Desktop' | Select-Object -First 1; if (-not $pkg) { Write-Error 'TradingView Store app not found'; exit 1 }; $exe = Join-Path $pkg.InstallLocation 'TradingView.exe'; Start-Process $exe -ArgumentList '--remote-debugging-port=9222'; Write-Host 'TradingView launched.'"
 if %errorlevel% neq 0 (
     echo.
     echo  ERROR: Could not launch TradingView.
