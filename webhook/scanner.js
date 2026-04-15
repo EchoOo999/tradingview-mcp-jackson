@@ -33,7 +33,7 @@ const ALERT_RESET_SESSION_MS = 4 * 60 * 60 * 1000;  // 4h dedup — session leve
 const ALERT_RESET_STRUCT_MS  = 8 * 60 * 60 * 1000;  // 8h dedup — structural levels (PWH/PWL/PMH/PML/Monday/WeeklyOpen)
 const ALERT_RESET_SFU_MS     = 8 * 60 * 60 * 1000;  // 8h dedup — SFU signals
 
-const TOP_N           = 250;
+const TOP_N           = 20;
 const MIN_VOLUME_USDT = 5_000_000;              // 5M USDT 24h
 
 const BOOTSTRAP_5M  = 100;
