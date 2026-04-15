@@ -188,20 +188,24 @@
 
   async function pick(item) {
     hide();
+
+    const sym = item.tvSymbol;
+
     try {
-      // Send the TV-format symbol (MEXC:BTCUSDT.P) — bridge passes it straight
-      // to chart.setSymbol(), which also auto-highlights the watchlist entry.
       const res = await fetch(`${BRIDGE}/set-symbol`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ symbol: item.tvSymbol }),
+        body:    JSON.stringify({ symbol: sym }),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        console.error('[coin-search] Bridge error:', err.error || res.status);
+      if (res.ok) {
+        console.log('[coin-search] ✓ Switched →', sym);
+        return;
       }
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
     } catch (e) {
-      console.error('[coin-search] Fetch failed:', e.message);
+      console.error('[coin-search] Bridge error for', sym, ':', e.message);
+      alert(`MEXC coin search: could not switch symbol.\n\n${e.message}\n\nMake sure inject_panel.mjs is running.`);
     }
   }
 
