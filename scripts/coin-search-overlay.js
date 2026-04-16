@@ -205,8 +205,16 @@
       row.appendChild(tvEl);
       row.appendChild(hintEl);
 
-      // mouseenter only for highlight — NO click listener (TV intercepts clicks)
+      // mouseenter for highlight only
       row.addEventListener('mouseenter', function () { selIdx = i; renderList(); });
+      // pointerdown fires before TV's mousedown/click interceptors
+      row.addEventListener('pointerdown', (function (capturedItem) {
+        return function (e) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          pick(capturedItem);
+        };
+      })(item));
 
       list.appendChild(row);
     });
