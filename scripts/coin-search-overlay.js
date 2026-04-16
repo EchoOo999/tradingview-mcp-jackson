@@ -4,14 +4,16 @@
  * Press Ctrl+F  → open search (reads your TV watchlist live from the DOM)
  * Type          → filter in real-time
  * ↑ / ↓        → navigate results
- * Enter / click → switch active chart to selected symbol via bridge (localhost:9224)
+ * Enter / GO    → switch active chart to selected symbol via bridge (localhost:9224)
  * Esc           → close
  * Click outside → close
  *
  * Symbol list: read from TV watchlist DOM [data-symbol-full] on every open.
  * Works with any symbol — ES, NQ, Oil, MEXC perps, anything in the watchlist.
  *
- * Symbol switch: POST { symbol: tvSymbol } → localhost:9224/set-symbol
+ * Symbol switch: POST { symbol: tvSymbol } → localhost:9224/set-symbol (via XHR)
+ * NOTE: click listeners removed from rows — TV intercepts mouse events on rows.
+ *       Use Enter key or the GO button to switch to the highlighted symbol.
  */
 (function () {
   'use strict';
@@ -25,13 +27,9 @@
   let selIdx     = 0;
 
   // ── Read watchlist from TV DOM ───────────────────────────────────────────────
-  // Try multiple selectors to catch symbols across all groups/tabs
   function loadWatchlistSymbols() {
     const seen = new Set();
     const results = [];
-
-    // Primary: data-symbol-full (visible rows)
-    // Secondary: data-field="symbol" (collapsed groups, alternate markup)
     const nodes = document.querySelectorAll('[data-symbol-full], [data-field="symbol"]');
     for (const el of nodes) {
       const tvSymbol = el.getAttribute('data-symbol-full') || el.textContent.trim();
@@ -72,7 +70,7 @@
     boxShadow:     '0 12px 40px rgba(0,0,0,0.55)',
   });
 
-  // Header — symbol count + current chart symbol
+  // Header
   const header = document.createElement('div');
   Object.assign(header.style, {
     padding:        '10px 16px 6px',
@@ -92,29 +90,56 @@
   header.appendChild(headerRight);
 
   function refreshHeader() {
-    headerLeft.textContent = `Watchlist (${allSymbols.length})`;
+    headerLeft.textContent = 'Watchlist (' + allSymbols.length + ')';
     try {
-      const sym = window.TradingViewApi._activeChartWidgetWV.value().symbol();
+      var sym = window.TradingViewApi._activeChartWidgetWV.value().symbol();
       headerRight.textContent = sym ? sym.replace(/^[^:]+:/, '') : '';
-    } catch { headerRight.textContent = ''; }
+    } catch (e) { headerRight.textContent = ''; }
   }
+
+  // Input row: input + GO button
+  const inputRow = document.createElement('div');
+  Object.assign(inputRow.style, {
+    display:      'flex',
+    alignItems:   'stretch',
+    borderBottom: '1px solid #363a45',
+  });
 
   const input = document.createElement('input');
   input.type         = 'text';
   input.autocomplete = 'off';
   input.spellcheck   = false;
   Object.assign(input.style, {
-    background:   '#131722',
-    border:       'none',
-    borderBottom: '1px solid #363a45',
-    color:        '#d1d4dc',
-    fontSize:     '15px',
-    padding:      '12px 16px',
-    outline:      'none',
-    width:        '100%',
-    boxSizing:    'border-box',
-    transition:   'color 0.15s',
+    background: '#131722',
+    border:     'none',
+    color:      '#d1d4dc',
+    fontSize:   '15px',
+    padding:    '12px 16px',
+    outline:    'none',
+    flex:       '1',
+    boxSizing:  'border-box',
+    transition: 'color 0.15s',
   });
+
+  const goBtn = document.createElement('button');
+  goBtn.textContent = 'GO';
+  Object.assign(goBtn.style, {
+    background:   '#f0b90b',
+    color:        '#131722',
+    border:       'none',
+    padding:      '0 18px',
+    fontSize:     '13px',
+    fontWeight:   '700',
+    cursor:       'pointer',
+    letterSpacing:'0.5px',
+    flexShrink:   '0',
+    outline:      'none',
+  });
+  goBtn.addEventListener('mouseenter', () => { goBtn.style.background = '#ffd740'; });
+  goBtn.addEventListener('mouseleave', () => { goBtn.style.background = '#f0b90b'; });
+
+  inputRow.appendChild(input);
+  inputRow.appendChild(goBtn);
 
   function setInputPlaceholder(text) {
     input.placeholder = text;
@@ -124,7 +149,7 @@
   Object.assign(list.style, { overflowY: 'auto', flex: '1' });
 
   box.appendChild(header);
-  box.appendChild(input);
+  box.appendChild(inputRow);
   box.appendChild(list);
   overlay.appendChild(box);
   document.body.appendChild(overlay);
@@ -135,7 +160,7 @@
     list.innerHTML = '';
 
     if (!allSymbols.length) {
-      const msg = document.createElement('div');
+      var msg = document.createElement('div');
       Object.assign(msg.style, { padding: '16px', color: '#787b86', fontSize: '13px' });
       msg.textContent = 'No watchlist symbols found — add symbols to your TV watchlist';
       list.appendChild(msg);
@@ -143,37 +168,46 @@
     }
 
     if (!filtered.length) {
-      const msg = document.createElement('div');
-      Object.assign(msg.style, { padding: '16px', color: '#787b86', fontSize: '13px' });
-      msg.textContent = 'No results';
-      list.appendChild(msg);
+      var msg2 = document.createElement('div');
+      Object.assign(msg2.style, { padding: '16px', color: '#787b86', fontSize: '13px' });
+      msg2.textContent = 'No results';
+      list.appendChild(msg2);
       return;
     }
 
-    filtered.slice(0, 60).forEach((item, i) => {
-      const row = document.createElement('div');
+    filtered.slice(0, 60).forEach(function (item, i) {
+      var row = document.createElement('div');
       Object.assign(row.style, {
         padding:      '9px 16px',
-        cursor:       'pointer',
+        cursor:       'default',
         display:      'flex',
         alignItems:   'center',
         gap:          '10px',
         background:   i === selIdx ? '#2a2e3a' : 'transparent',
         borderBottom: '1px solid #1a1e2a',
+        userSelect:   'none',
       });
 
-      const coinEl = document.createElement('span');
+      var coinEl = document.createElement('span');
       Object.assign(coinEl.style, { fontWeight: '600', color: '#f0b90b', minWidth: '80px', fontSize: '14px' });
       coinEl.textContent = item.display;
 
-      const tvEl = document.createElement('span');
+      var tvEl = document.createElement('span');
       Object.assign(tvEl.style, { color: '#787b86', fontSize: '12px' });
       tvEl.textContent = item.tvSymbol;
 
+      // Hint text at end
+      var hintEl = document.createElement('span');
+      Object.assign(hintEl.style, { color: '#444', fontSize: '11px', marginLeft: 'auto' });
+      hintEl.textContent = i === selIdx ? '← Enter / GO' : '';
+
       row.appendChild(coinEl);
       row.appendChild(tvEl);
-      row.addEventListener('mouseenter', () => { selIdx = i; renderList(); });
-      row.addEventListener('click', () => pick(item));
+      row.appendChild(hintEl);
+
+      // mouseenter only for highlight — NO click listener (TV intercepts clicks)
+      row.addEventListener('mouseenter', function () { selIdx = i; renderList(); });
+
       list.appendChild(row);
     });
   }
@@ -181,15 +215,17 @@
   // ── Filtering ───────────────────────────────────────────────────────────────
 
   function applyFilter(query) {
-    const q = query.trim().toUpperCase();
+    var q = query.trim().toUpperCase();
     if (!q) {
       filtered = allSymbols.slice(0, 60);
     } else {
       filtered = allSymbols
-        .filter(s => s.display.toUpperCase().includes(q) || s.tvSymbol.toUpperCase().includes(q))
-        .sort((a, b) => {
-          const aStart = a.display.toUpperCase().startsWith(q) ? 0 : 1;
-          const bStart = b.display.toUpperCase().startsWith(q) ? 0 : 1;
+        .filter(function (s) {
+          return s.display.toUpperCase().includes(q) || s.tvSymbol.toUpperCase().includes(q);
+        })
+        .sort(function (a, b) {
+          var aStart = a.display.toUpperCase().startsWith(q) ? 0 : 1;
+          var bStart = b.display.toUpperCase().startsWith(q) ? 0 : 1;
           return aStart - bStart || a.display.localeCompare(b.display);
         });
     }
@@ -198,45 +234,74 @@
   }
 
   // ── Symbol selection ────────────────────────────────────────────────────────
+  // Strategy: try direct TradingViewApi first (no CORS/CSP issues since we're
+  // already in the renderer), fall back to XHR bridge if the API isn't exposed.
 
-  async function pick(item) {
-    const sym         = item.tvSymbol;
-    const displayName = item.display;
+  function pick(item) {
+    var sym         = item.tvSymbol;
+    var displayName = item.display;
 
-    // ── DEBUG: confirm click is firing ───────────────────────────────────────
-    window.alert('[coin-search] click registered: ' + sym);
-
-    // Immediate visual feedback — keep overlay open
     input.value       = '';
     input.style.color = '#f0b90b';
-    setInputPlaceholder(`Switching to ${displayName}…`);
-    list.innerHTML    = '';
+    setInputPlaceholder('Switching to ' + displayName + '…');
+    list.innerHTML = '';
 
+    // ── Primary: direct TradingViewApi call ──────────────────────────────────
     try {
-      const res = await fetch(`${BRIDGE}/set-symbol`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ symbol: sym }),
-      });
-      if (res.ok) {
-        console.log('[coin-search] ✓ Switched →', sym);
-        input.style.color = '#089981';
-        setInputPlaceholder(`✓ Switched to ${displayName}`);
-        setTimeout(hide, 700);
-        return;
-      }
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${res.status}`);
+      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      chart.setSymbol(sym, {});
+      console.log('[coin-search] Switched (direct API) ->', sym);
+      input.style.color = '#089981';
+      setInputPlaceholder('Switched to ' + displayName);
+      setTimeout(hide, 700);
+      return;
     } catch (e) {
-      console.error('[coin-search] Bridge error for', sym, ':', e.message);
+      console.warn('[coin-search] Direct API failed, trying XHR bridge:', e.message);
+    }
+
+    // ── Fallback: XHR to bridge at localhost:9224 ────────────────────────────
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', BRIDGE + '/set-symbol', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.timeout = 5000;
+
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        console.log('[coin-search] Switched (XHR bridge) ->', sym);
+        input.style.color = '#089981';
+        setInputPlaceholder('Switched to ' + displayName);
+        setTimeout(hide, 700);
+      } else {
+        var errMsg = 'HTTP ' + xhr.status;
+        try { errMsg = JSON.parse(xhr.responseText).error || errMsg; } catch (e) {}
+        onFail(errMsg);
+      }
+    };
+
+    xhr.onerror = function () {
+      onFail('Network error — is inject_panel.mjs running?');
+    };
+
+    xhr.ontimeout = function () {
+      onFail('Timeout — bridge not responding');
+    };
+
+    function onFail(msg) {
+      console.error('[coin-search] Switch failed for', sym, ':', msg);
       input.style.color = '#f23645';
-      setInputPlaceholder(`✗ ${e.message} — is inject_panel.mjs running?`);
-      setTimeout(() => {
+      setInputPlaceholder('Failed: ' + msg);
+      setTimeout(function () {
         input.style.color = '#d1d4dc';
         setInputPlaceholder('Search symbol…');
         applyFilter('');
       }, 3000);
     }
+
+    xhr.send(JSON.stringify({ symbol: sym }));
+  }
+
+  function pickSelected() {
+    if (filtered[selIdx]) pick(filtered[selIdx]);
   }
 
   // ── Show / hide ─────────────────────────────────────────────────────────────
@@ -249,7 +314,9 @@
     overlay.style.display = 'flex';
     input.value = '';
     applyFilter('');
-    requestAnimationFrame(() => requestAnimationFrame(() => input.focus()));
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () { input.focus(); });
+    });
   }
 
   function hide() {
@@ -262,7 +329,7 @@
 
   // ── Keyboard ─────────────────────────────────────────────────────────────────
 
-  window.addEventListener('keydown', e => {
+  window.addEventListener('keydown', function (e) {
     if (e.ctrlKey && e.key === 'f') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -275,9 +342,9 @@
     }
   }, true);
 
-  input.addEventListener('input', () => applyFilter(input.value));
+  input.addEventListener('input', function () { applyFilter(input.value); });
 
-  input.addEventListener('keydown', e => {
+  input.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowDown') {
       selIdx = Math.min(selIdx + 1, Math.min(filtered.length, 60) - 1);
       renderList();
@@ -286,14 +353,20 @@
       selIdx = Math.max(selIdx - 1, 0);
       renderList();
       e.preventDefault();
-    } else if (e.key === 'Enter' && filtered[selIdx]) {
-      pick(filtered[selIdx]);
+    } else if (e.key === 'Enter') {
+      pickSelected();
     }
   });
 
-  overlay.addEventListener('mousedown', e => {
+  // GO button click — safe: this is our own button, not a TV element
+  goBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    pickSelected();
+  });
+
+  overlay.addEventListener('mousedown', function (e) {
     if (e.target === overlay) hide();
   });
 
-  console.log('[coin-search] Ready — Ctrl+F to search your watchlist.');
+  console.log('[coin-search] Ready — Ctrl+F to search watchlist. Use Enter or GO button to switch symbol.');
 })();
