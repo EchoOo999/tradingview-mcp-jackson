@@ -337,13 +337,18 @@
 
   // ── Keyboard ─────────────────────────────────────────────────────────────────
 
-  window.addEventListener('keydown', function (e) {
+  // Ctrl+F: use keyup — TV's keydown capture handler calls stopImmediatePropagation()
+  // on Ctrl+F before our listener runs. keyup is not intercepted by TV.
+  window.addEventListener('keyup', function (e) {
     if (e.ctrlKey && e.key === 'f') {
       e.preventDefault();
       e.stopImmediatePropagation();
       isOpen() ? hide() : show();
-      return;
     }
+  }, true);
+
+  // Escape: keydown is fine here (TV doesn't eat Escape)
+  window.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && isOpen()) {
       e.preventDefault();
       hide();
