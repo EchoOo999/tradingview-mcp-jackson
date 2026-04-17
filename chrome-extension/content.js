@@ -715,13 +715,6 @@
 
   // ─── Position Drawing Capture ─────────────────────────────────────────────
 
-  // Floating "→ MEXC" button shown whenever a Risk/Reward drawing exists on chart
-  const drawBtn = document.createElement('div');
-  drawBtn.id = 'msp-draw-btn';
-  drawBtn.textContent = '→ MEXC';
-  drawBtn.title = 'Fill Entry / TP / SL from the Long/Short Position drawing';
-  document.body.appendChild(drawBtn);
-
   // Detect if a shape name matches a Long/Short Position drawing tool
   function _isRRShape(name) {
     if (!name) return false;
@@ -835,9 +828,10 @@
     const limitBtn = document.querySelector('#msp-type-toggle [data-value="limit"]');
     if (limitBtn && !limitBtn.classList.contains('active')) limitBtn.click();
 
+    // Always overwrite all three fields on every click — never leave stale values
     entryInput.value = entry;
-    if (tp > 0) document.getElementById('msp-tp').value = tp;
-    if (sl > 0) document.getElementById('msp-sl').value = sl;
+    document.getElementById('msp-tp').value = tp > 0 ? tp : '';
+    document.getElementById('msp-sl').value = sl > 0 ? sl : '';
     updatePreview();
 
     const dir = isLong ? '🟢 LONG' : '🔴 SHORT';
@@ -847,61 +841,6 @@
     );
   }
 
-  // ─── Drawing Observer ─────────────────────────────────────────────────────
-
-  let drawBtnVisible = false;
-
-  function hasRRDrawingOnChart() {
-    try {
-      const widget = window.TradingViewApi?._activeChartWidgetWV?.value?.();
-      if (!widget) return false;
-      return (widget.getAllShapes?.() ?? []).some(s => _isRRShape(s.name));
-    } catch (_) {}
-    return false;
-  }
-
-  function positionDrawBtn() {
-    const toolbar = document.querySelector(
-      '[class*="floatingEditToolbar"], [class*="floating-toolbar"], [data-name="drawing-toolbar"]'
-    );
-    if (toolbar) {
-      const r = toolbar.getBoundingClientRect();
-      drawBtn.style.top = (r.bottom + 7) + 'px';
-      drawBtn.style.left = r.left + 'px';
-      drawBtn.style.right = 'auto';
-      drawBtn.style.transform = 'none';
-    } else {
-      drawBtn.style.top = '50%';
-      drawBtn.style.right = '52px';
-      drawBtn.style.left = 'auto';
-      drawBtn.style.transform = 'translateY(-50%)';
-    }
-  }
-
-  let drawCheckTimer = null;
-  const drawObserver = new MutationObserver(() => {
-    clearTimeout(drawCheckTimer);
-    drawCheckTimer = setTimeout(() => {
-      const active = hasRRDrawingOnChart();
-      if (active === drawBtnVisible) return;
-      drawBtnVisible = active;
-      if (active) { positionDrawBtn(); drawBtn.style.display = 'flex'; }
-      else         { drawBtn.style.display = 'none'; }
-    }, 120);
-  });
-
-  drawObserver.observe(document.body, { childList: true, subtree: true });
-
-  // Also poll every 3s in case MutationObserver misses API-level drawing changes
-  setInterval(() => {
-    const active = hasRRDrawingOnChart();
-    if (active === drawBtnVisible) return;
-    drawBtnVisible = active;
-    if (active) { positionDrawBtn(); drawBtn.style.display = 'flex'; }
-    else         { drawBtn.style.display = 'none'; }
-  }, 3000);
-
-  drawBtn.addEventListener('click', () => applyCapture(tryReadPositionDrawing()));
   document.getElementById('msp-capture-btn').addEventListener('click', () => applyCapture(tryReadPositionDrawing()));
 
 })();
