@@ -759,30 +759,52 @@
 
       if (!found) return null;
 
-      // Determine direction
+      // Determine direction from shape name
       const nameStr = (found.internalName || found.name || '').toLowerCase();
       const isLong = !nameStr.includes('short');
 
-      // Read prices via getShapeById().getPoints() — confirmed working via CDP
       const entity = widget.getShapeById?.(found.id);
-      const points = entity?.getPoints?.() ?? [];
-      const prices = points.map(p => p.price).filter(p => typeof p === 'number' && p > 0);
-      if (prices.length < 2) {
-        return { shapeFound: true, isLong };
-      }
+      if (!entity) return { shapeFound: true, isLong };
 
-      prices.sort((a, b) => b - a); // highest → lowest
-      let entry, tp, sl;
-      if (isLong) {
-        // Long: TP (highest) > Entry (middle) > SL (lowest)
-        [tp, entry, sl] = prices.length >= 3 ? prices : [prices[0], prices[1], 0];
-      } else {
-        // Short: SL (highest) > Entry (middle) > TP (lowest)
-        [sl, entry, tp] = prices.length >= 3 ? prices : [prices[0], prices[1], 0];
-      }
-
+      // Entry price from getPoints() — RiskReward tool returns only the entry point
+      const points = entity.getPoints?.() ?? [];
+      const entry = points[0]?.price;
       if (!(entry > 0)) return { shapeFound: true, isLong };
-      return { entry, tp: tp || 0, sl: sl || 0, isLong };
+
+      // profitLevel / stopLevel are tick-offsets from entry (confirmed via CDP)
+      const props = entity.getProperties?.() ?? {};
+      const profitTicks = props.profitLevel;
+      const stopTicks   = props.stopLevel;
+
+      if (!(profitTicks > 0) || !(stopTicks > 0)) return { shapeFound: true, isLong };
+
+      // tickSize = minmov / pricescale from the symbol info
+      let tickSize = 0;
+      try {
+        const si = widget._chartWidget?._modelWV?._value?.m_model
+                         ?._mainSeries?._symbolInfo?._value;
+        const minmov = si?.minmov ?? 1;
+        const pricescale = si?.pricescale ?? 1;
+        tickSize = minmov / pricescale;
+      } catch (_) {}
+
+      // Fallback: infer tick size from entry decimal places
+      if (tickSize <= 0) {
+        const decimals = (entry.toString().split('.')[1] || '').length;
+        tickSize = Math.pow(10, -decimals) || 0.01;
+      }
+
+      const round = (x) => Math.round(x / tickSize) * tickSize;
+      let tp, sl;
+      if (isLong) {
+        tp = round(entry + profitTicks * tickSize);
+        sl = round(entry - stopTicks  * tickSize);
+      } else {
+        tp = round(entry - profitTicks * tickSize);
+        sl = round(entry + stopTicks  * tickSize);
+      }
+
+      return { entry, tp, sl, isLong };
 
     } catch (err) {
       console.warn('[MSP] tryReadPositionDrawing:', err.message);
