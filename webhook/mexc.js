@@ -6,34 +6,47 @@ import crypto from 'crypto';
 
 const BASE_URL = 'https://contract.mexc.com';
 
-// Cache contractSize per symbol (fetched once from MEXC contract detail)
-// vol = integer contracts = floor(usd_risk / (price × contractSize))
-const contractSizeCache = {};
+// Cache contract detail per symbol (fetched once from MEXC)
+const contractDetailCache = {};
 
-async function getContractSize(symbol) {
-  if (contractSizeCache[symbol] !== undefined) return contractSizeCache[symbol];
+async function getContractDetail(symbol) {
+  if (contractDetailCache[symbol]) return contractDetailCache[symbol];
 
   try {
     const res  = await fetch(`${BASE_URL}/api/v1/contract/detail?symbol=${symbol}`);
     const data = await res.json();
-    if ((data.code === 0 || data.code === 200) && data.data?.contractSize) {
-      const size = Number(data.data.contractSize);
-      contractSizeCache[symbol] = size;
-      console.log(`[contract detail] ${symbol} contractSize=${size} minVol=${data.data.minVol} volScale=${data.data.volScale}`);
-      return size;
+    if ((data.code === 0 || data.code === 200) && data.data) {
+      const d = data.data;
+      // priceUnit may be explicit or derived from priceScale (decimal places for price)
+      const priceScale = Number(d.priceScale ?? 1);
+      const priceUnit  = d.priceUnit ? Number(d.priceUnit) : Math.pow(10, -priceScale);
+      const detail = {
+        contractSize: Number(d.contractSize || 1),
+        priceUnit,
+        priceScale,
+        minVol:   Number(d.minVol   || 1),
+        volScale: Number(d.volScale || 0),
+      };
+      contractDetailCache[symbol] = detail;
+      console.log(`[contract detail] ${symbol}:`, JSON.stringify(detail));
+      return detail;
     }
-    console.warn(`[contract detail] No contractSize for ${symbol}:`, JSON.stringify(data).slice(0, 200));
+    console.warn(`[contract detail] No data for ${symbol}:`, JSON.stringify(data).slice(0, 200));
   } catch (e) {
     console.warn(`[contract detail] Fetch failed for ${symbol}: ${e.message}`);
   }
 
-  // Fallback contractSize per known base coins
-  const FALLBACK = { BTC: 0.0001, ETH: 0.01, SOL: 0.1 };
-  const base = symbol.split('_')[0].toUpperCase();
-  const size = FALLBACK[base] ?? 1;
-  console.warn(`[contract detail] Using fallback contractSize=${size} for ${symbol}`);
-  contractSizeCache[symbol] = size;
-  return size;
+  // Fallbacks per known base coins
+  const FALLBACK = {
+    BTC: { contractSize: 0.0001, priceUnit: 0.1,   priceScale: 1, minVol: 1, volScale: 0 },
+    ETH: { contractSize: 0.01,   priceUnit: 0.01,  priceScale: 2, minVol: 1, volScale: 0 },
+    SOL: { contractSize: 0.1,    priceUnit: 0.01,  priceScale: 2, minVol: 1, volScale: 0 },
+  };
+  const base   = symbol.split('_')[0].toUpperCase();
+  const detail = FALLBACK[base] ?? { contractSize: 1, priceUnit: 0.01, priceScale: 2, minVol: 1, volScale: 0 };
+  console.warn(`[contract detail] Using fallback for ${symbol}:`, JSON.stringify(detail));
+  contractDetailCache[symbol] = detail;
+  return detail;
 }
 
 // MEXC side codes
@@ -153,10 +166,12 @@ export async function setLeverage(symbol, leverage, openType, positionType, apiK
  * the position may take a moment to appear).
  * positionType: 1 = long, 2 = short
  */
-async function getOpenPosition(symbol, positionType, apiKey, apiSecret, maxRetries = 3) {
+async function getOpenPosition(symbol, positionType, apiKey, apiSecret, maxRetries = 5) {
   for (let i = 0; i < maxRetries; i++) {
-    if (i > 0) await new Promise(r => setTimeout(r, 1000));
+    if (i > 0) await new Promise(r => setTimeout(r, 500));
+    const t = Date.now();
     const positions = await request('GET', '/api/v1/private/position/open_positions', null, apiKey, apiSecret);
+    console.log(`[timing] getOpenPosition attempt ${i + 1}/${maxRetries}: ${Date.now() - t}ms, found ${(positions||[]).length} positions`);
     const match = (positions || []).find(p => p.symbol === symbol && p.positionType === positionType);
     if (match) return match;
   }
@@ -209,34 +224,44 @@ export async function placeOrder(params) {
     apiSecret,
   } = params;
 
+  const t0 = Date.now();
   const mexcSide = SIDE[side];
   if (!mexcSide) throw new Error(`Invalid side: ${side}. Use: ${Object.keys(SIDE).join(', ')}`);
 
-  const isLong = side === 'open_long' || side === 'close_long';
+  const isLong       = side === 'open_long'  || side === 'close_long';
   const positionType = isLong ? 1 : 2;
-  const openType = 1; // isolated
+  const openType     = 1; // isolated
 
-  // Set leverage first
-  await setLeverage(symbol, leverage, openType, positionType, apiKey, apiSecret);
+  // Parallelize: setLeverage + ticker fetch + contract detail (saves ~2s vs sequential)
+  const needTicker = !price || type === 'market';
+  const [, tickerData, detail] = await Promise.all([
+    setLeverage(symbol, leverage, openType, positionType, apiKey, apiSecret),
+    needTicker
+      ? fetch(`${BASE_URL}/api/v1/contract/ticker?symbol=${symbol}`).then(r => r.json())
+      : Promise.resolve(null),
+    getContractDetail(symbol),
+  ]);
+  console.log(`[timing] leverage+ticker+detail parallel: ${Date.now() - t0}ms`);
 
-  // Get current price for position sizing
+  // Resolve live price for market orders (or as fallback for limit)
   let contractPrice = price;
-  if (!contractPrice || type === 'market') {
-    const tickerRes = await fetch(`${BASE_URL}/api/v1/contract/ticker?symbol=${symbol}`);
-    const tickerData = await tickerRes.json();
-    if (tickerData.code !== 0 && tickerData.code !== 200) throw new Error(`Ticker error: ${tickerData.message}`);
+  if (needTicker) {
+    if (!tickerData || (tickerData.code !== 0 && tickerData.code !== 200))
+      throw new Error(`Ticker error: ${tickerData?.message ?? 'no data'}`);
     contractPrice = parseFloat(tickerData.data.lastPrice || tickerData.data.indexPrice);
   }
 
-  // vol is an integer number of contracts (volScale=0, minVol=1 on MEXC)
-  // contracts = floor(usd_risk / (price × contractSize))
-  const contractSize = await getContractSize(symbol);
-  const volume       = Math.floor(usd_risk / (contractPrice * contractSize));
-  console.log(`[${new Date().toISOString()}] Volume calc: floor(${usd_risk} / (${contractPrice} × ${contractSize})) = ${volume} contracts`);
+  // Price rounding helper — rounds to nearest priceUnit (fixes MEXC error 2015)
+  const { contractSize, priceUnit, minVol } = detail;
+  const roundPrice = (p) => p ? Math.round(p / priceUnit) * priceUnit : p;
+
+  // Vol: integer contracts, minimum minVol
+  const rawVol = Math.floor(usd_risk / (contractPrice * contractSize));
+  const volume = Math.max(minVol, rawVol);
+  console.log(`[${new Date().toISOString()}] Vol: floor(${usd_risk}/(${contractPrice}×${contractSize}))=${rawVol} → clamped to ${volume} (minVol=${minVol})`);
   if (volume < 1) throw new Error(`Volume rounds to 0 contracts. Min usd_risk ≈ $${(contractPrice * contractSize).toFixed(2)}.`);
 
-  // Place the market/limit order
-  // NOTE: price must be completely absent for market orders — explicit assignment only for limit
+  // Build order — price must be absent for market orders
   const orderBody = {
     symbol,
     vol: volume,
@@ -246,32 +271,39 @@ export async function placeOrder(params) {
     openType,
   };
   if (type === 'limit' && price != null) {
-    orderBody.price = price;
+    orderBody.price = roundPrice(price);
   }
-  console.log(`[order] type=${type} | price field included: ${type === 'limit' && price != null}`);
-
   console.log(`[${new Date().toISOString()}] Submitting order: ${JSON.stringify(orderBody)}`);
-  const orderId = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
 
-  // Attach TP/SL via stoporder/place (shows in "TP/SL Order" tab, auto-cancels with position)
+  const t1 = Date.now();
+  const orderId = await request('POST', '/api/v1/private/order/submit', orderBody, apiKey, apiSecret);
+  console.log(`[timing] order submit: ${Date.now() - t1}ms`);
+
+  // Attach TP/SL (rounded to priceUnit to avoid error 2015)
   const isOpening = side === 'open_long' || side === 'open_short';
   let tpslResult = null;
   if (isOpening && (tp || sl)) {
+    const t2 = Date.now();
     const position = await getOpenPosition(symbol, positionType, apiKey, apiSecret);
+    console.log(`[timing] getOpenPosition: ${Date.now() - t2}ms`);
     if (position) {
+      const t3 = Date.now();
       tpslResult = await setPositionTpSl({
         symbol,
         positionId: position.positionId,
         vol: position.vol ?? volume,
-        tp,
-        sl,
+        tp: roundPrice(tp),
+        sl: roundPrice(sl),
         apiKey,
         apiSecret,
       });
+      console.log(`[timing] setPositionTpSl: ${Date.now() - t3}ms`);
     } else {
-      console.warn(`[WARN] Could not find open position for ${symbol} to attach TP/SL`);
+      console.warn(`[WARN] No open position for ${symbol} after retries — TP/SL not attached`);
     }
   }
+
+  console.log(`[timing] total placeOrder: ${Date.now() - t0}ms`);
 
   return {
     orderId,
@@ -282,8 +314,8 @@ export async function placeOrder(params) {
     volume,
     entryPrice: contractPrice,
     positionUsd: Math.round(usd_risk * 100) / 100,
-    tp: tp || null,
-    sl: sl || null,
+    tp: roundPrice(tp) || null,
+    sl: roundPrice(sl) || null,
     tpslAttached: tpslResult !== null,
   };
 }

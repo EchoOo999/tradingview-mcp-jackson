@@ -599,6 +599,16 @@
     const usd_risk    = parseFloat(document.getElementById('msp-risk').value)     || 50;
     const tp          = parseFloat(document.getElementById('msp-tp').value)        || 0;
     const sl          = parseFloat(document.getElementById('msp-sl').value)        || 0;
+
+    // Re-fetch live price one final time for Market orders before building payload
+    if (orderType === 'market') {
+      const freshPrice = getCurrentPrice();
+      if (freshPrice && freshPrice > 0) {
+        entryInput.value = freshPrice;
+        updatePreview();
+      }
+    }
+
     const entryPrice  = parseFloat(document.getElementById('msp-entry').value)     || 0;
 
     if (orderType === 'limit' && entryPrice <= 0) {
@@ -824,14 +834,20 @@
     // Auto-set direction from drawing type
     if (isLong != null) setDirection(isLong ? 'long' : 'short');
 
-    // Switch to Limit so entry field is editable
-    const limitBtn = document.querySelector('#msp-type-toggle [data-value="limit"]');
-    if (limitBtn && !limitBtn.classList.contains('active')) limitBtn.click();
-
-    // Always overwrite all three fields on every click — never leave stale values
-    entryInput.value = entry;
+    // TP and SL always come from the drawing
     document.getElementById('msp-tp').value = tp > 0 ? tp : '';
     document.getElementById('msp-sl').value = sl > 0 ? sl : '';
+
+    // Entry: use live market price for Market mode; drawing's entry for Limit mode
+    // (Market mode auto-refreshes entry every 2s via syncEntryPrice anyway)
+    const livePrice = getCurrentPrice();
+    if (typeToggle.getValue() === 'market') {
+      // Keep live price — don't overwrite with stale drawing entry
+      if (livePrice && livePrice > 0) entryInput.value = livePrice;
+    } else {
+      // Limit mode: drawing's entry is the intended limit price
+      entryInput.value = entry;
+    }
     updatePreview();
 
     const dir = isLong ? '🟢 LONG' : '🔴 SHORT';
