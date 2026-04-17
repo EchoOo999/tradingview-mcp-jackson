@@ -190,6 +190,9 @@
         </div>
       </div>
 
+      <!-- Drawing Capture -->
+      <button id="msp-capture-btn" title="Fill Entry / TP / SL from a selected Long/Short Position drawing on the chart">📋 From Drawing</button>
+
       <!-- R/R Preview -->
       <div id="msp-rr-box">
         <div class="msp-rr-header">
@@ -709,5 +712,174 @@
     }
     sendOrder(selectedDirection === 'long' ? 'open_long' : 'open_short');
   });
+
+  // ─── Position Drawing Capture ─────────────────────────────────────────────
+
+  // Floating "→ MEXC" button shown whenever a Risk/Reward drawing exists on chart
+  const drawBtn = document.createElement('div');
+  drawBtn.id = 'msp-draw-btn';
+  drawBtn.textContent = '→ MEXC';
+  drawBtn.title = 'Fill Entry / TP / SL from the Long/Short Position drawing';
+  document.body.appendChild(drawBtn);
+
+  // Detect if a shape name matches a Long/Short Position drawing tool
+  function _isRRShape(name) {
+    if (!name) return false;
+    const n = name.toLowerCase();
+    return n.includes('riskreward') || n === 'long_position' || n === 'short_position' ||
+           n === 'linetoollongtrade' || n === 'linetoolshorttrade';
+  }
+
+  function tryReadPositionDrawing() {
+    try {
+      const widget = window.TradingViewApi?._activeChartWidgetWV?.value?.();
+      if (!widget) return null;
+
+      // widget IS the chart — getAllShapes() lives directly on it
+      const allShapes = widget.getAllShapes?.() ?? [];
+
+      // Find Long/Short Position drawings; also check internal toolname via getShapeById
+      let found = null;
+      for (const shape of allShapes) {
+        let isRR = _isRRShape(shape.name);
+        let internalName = shape.name;
+
+        if (!isRR) {
+          try {
+            const tn = widget.getShapeById?.(shape.id)?._source?.toolname ?? '';
+            if (/LineToolRiskReward|LongTrade|ShortTrade/i.test(tn)) {
+              isRR = true;
+              internalName = tn;
+            }
+          } catch (_) {}
+        }
+
+        if (isRR) found = { ...shape, internalName };
+      }
+
+      if (!found) return null;
+
+      // Determine direction
+      const nameStr = (found.internalName || found.name || '').toLowerCase();
+      const isLong = !nameStr.includes('short');
+
+      // Read prices via getShapeById().getPoints() — confirmed working via CDP
+      const entity = widget.getShapeById?.(found.id);
+      const points = entity?.getPoints?.() ?? [];
+      const prices = points.map(p => p.price).filter(p => typeof p === 'number' && p > 0);
+      if (prices.length < 2) {
+        return { shapeFound: true, isLong };
+      }
+
+      prices.sort((a, b) => b - a); // highest → lowest
+      let entry, tp, sl;
+      if (isLong) {
+        // Long: TP (highest) > Entry (middle) > SL (lowest)
+        [tp, entry, sl] = prices.length >= 3 ? prices : [prices[0], prices[1], 0];
+      } else {
+        // Short: SL (highest) > Entry (middle) > TP (lowest)
+        [sl, entry, tp] = prices.length >= 3 ? prices : [prices[0], prices[1], 0];
+      }
+
+      if (!(entry > 0)) return { shapeFound: true, isLong };
+      return { entry, tp: tp || 0, sl: sl || 0, isLong };
+
+    } catch (err) {
+      console.warn('[MSP] tryReadPositionDrawing:', err.message);
+      return null;
+    }
+  }
+
+  function applyCapture(data) {
+    if (!data) {
+      setStatus('❌ No Long/Short Position drawing found on chart', 'error', 5000);
+      return;
+    }
+    if (data.shapeFound && !data.entry) {
+      setStatus('❌ Drawing detected but prices unreadable — try selecting it first', 'error', 5000);
+      return;
+    }
+
+    const { entry, tp, sl, isLong } = data;
+    if (!(entry > 0)) {
+      setStatus('❌ Could not read prices from drawing', 'error', 5000);
+      return;
+    }
+
+    // Auto-set direction from drawing type
+    if (isLong != null) setDirection(isLong ? 'long' : 'short');
+
+    // Switch to Limit so entry field is editable
+    const limitBtn = document.querySelector('#msp-type-toggle [data-value="limit"]');
+    if (limitBtn && !limitBtn.classList.contains('active')) limitBtn.click();
+
+    entryInput.value = entry;
+    if (tp > 0) document.getElementById('msp-tp').value = tp;
+    if (sl > 0) document.getElementById('msp-sl').value = sl;
+    updatePreview();
+
+    const dir = isLong ? '🟢 LONG' : '🔴 SHORT';
+    setStatus(
+      `✅ ${dir} · Entry ${fmtPrice(entry)}${tp > 0 ? ' · TP ' + fmtPrice(tp) : ''}${sl > 0 ? ' · SL ' + fmtPrice(sl) : ''}`,
+      'success', 6000
+    );
+  }
+
+  // ─── Drawing Observer ─────────────────────────────────────────────────────
+
+  let drawBtnVisible = false;
+
+  function hasRRDrawingOnChart() {
+    try {
+      const widget = window.TradingViewApi?._activeChartWidgetWV?.value?.();
+      if (!widget) return false;
+      return (widget.getAllShapes?.() ?? []).some(s => _isRRShape(s.name));
+    } catch (_) {}
+    return false;
+  }
+
+  function positionDrawBtn() {
+    const toolbar = document.querySelector(
+      '[class*="floatingEditToolbar"], [class*="floating-toolbar"], [data-name="drawing-toolbar"]'
+    );
+    if (toolbar) {
+      const r = toolbar.getBoundingClientRect();
+      drawBtn.style.top = (r.bottom + 7) + 'px';
+      drawBtn.style.left = r.left + 'px';
+      drawBtn.style.right = 'auto';
+      drawBtn.style.transform = 'none';
+    } else {
+      drawBtn.style.top = '50%';
+      drawBtn.style.right = '52px';
+      drawBtn.style.left = 'auto';
+      drawBtn.style.transform = 'translateY(-50%)';
+    }
+  }
+
+  let drawCheckTimer = null;
+  const drawObserver = new MutationObserver(() => {
+    clearTimeout(drawCheckTimer);
+    drawCheckTimer = setTimeout(() => {
+      const active = hasRRDrawingOnChart();
+      if (active === drawBtnVisible) return;
+      drawBtnVisible = active;
+      if (active) { positionDrawBtn(); drawBtn.style.display = 'flex'; }
+      else         { drawBtn.style.display = 'none'; }
+    }, 120);
+  });
+
+  drawObserver.observe(document.body, { childList: true, subtree: true });
+
+  // Also poll every 3s in case MutationObserver misses API-level drawing changes
+  setInterval(() => {
+    const active = hasRRDrawingOnChart();
+    if (active === drawBtnVisible) return;
+    drawBtnVisible = active;
+    if (active) { positionDrawBtn(); drawBtn.style.display = 'flex'; }
+    else         { drawBtn.style.display = 'none'; }
+  }, 3000);
+
+  drawBtn.addEventListener('click', () => applyCapture(tryReadPositionDrawing()));
+  document.getElementById('msp-capture-btn').addEventListener('click', () => applyCapture(tryReadPositionDrawing()));
 
 })();
