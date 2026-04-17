@@ -1,20 +1,11 @@
 /**
- * WebSocket SFP Scanner — MEXC Perpetual Futures
+ * WebSocket Scanner — MEXC Perpetual Futures
  *
- * CTA General Setup (3 reasons in order):
- *   1. LOCATION  — price is at a key level (PWH/PWL/PMH/PML/Monday H-L/Daily-Weekly Open)
- *   2. STRUCTURE — W pattern (long) or M pattern (short) confirmed on 5m
- *   3. MOMENTUM  — divergence: OBV, RSI, MACD histogram
+ * CTA SFP (5m): Location → Structure (W/M on key level) → Momentum
+ * LJ Setup (1H): HTF ascending support TL (LONG) or descending resistance TL (SHORT)
+ *   originating from W bottoms / M tops; W/M lows/highs touch the TL → neckline break alert
  *
- * Signal rank 1–16 (unique per confluence combination):
- *   rank = 1 + (hasLocation<<3 | hasOBV<<2 | hasRSI<<1 | hasMACD)
- *
- * Key levels refreshed every 1h via REST (no lookahead):
- *   PWH / PWL        = last COMPLETED week high / low
- *   PMH / PML        = last COMPLETED month high / low
- *   Monday High/Low  = last Monday daily bar
- *   Weekly Open      = current week open (forming weekly bar)
- *   Daily Open       = current day open  (forming daily bar)
+ * Rank formula (SFP): 1 + (loc<<3 | obv<<2 | rsi<<1 | macd) → 1/16–16/16
  */
 
 import WebSocket from 'ws';
@@ -27,22 +18,21 @@ const TELEGRAM_API      = 'https://api.telegram.org';
 const PING_INTERVAL_MS  = 15_000;
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS  = 60_000;
-const VOLUME_REFRESH_MS = 60 * 60 * 1000;      // 1h
-const LEVEL_REFRESH_MS  = 60 * 60 * 1000;      // 1h (staggered 30min after volume)
-const ALERT_RESET_SESSION_MS = 4 * 60 * 60 * 1000;  // 4h dedup — session levels (Asia/London)
-const ALERT_RESET_STRUCT_MS  = 8 * 60 * 60 * 1000;  // 8h dedup — structural levels (PWH/PWL/PMH/PML/Monday/WeeklyOpen)
-const ALERT_RESET_SFU_MS     = 8 * 60 * 60 * 1000;  // 8h dedup — SFU signals
-const ALERT_RESET_WBO_MS     = 24 * 60 * 60 * 1000; // 24h dedup — W Breakout signals
+const VOLUME_REFRESH_MS = 60 * 60 * 1000;
+const LEVEL_REFRESH_MS  = 60 * 60 * 1000;
+const ALERT_RESET_SESSION_MS = 4 * 60 * 60 * 1000;
+const ALERT_RESET_STRUCT_MS  = 8 * 60 * 60 * 1000;
+const ALERT_RESET_LJ_MS      = 24 * 60 * 60 * 1000;
 
 const TOP_N           = 20;
-const MIN_VOLUME_USDT = 5_000_000;              // 5M USDT 24h
+const MIN_VOLUME_USDT = 5_000_000;
 
 const BOOTSTRAP_5M  = 100;
-const BOOTSTRAP_1H  = 500;   // ~20 days of 1H bars
-const BOOTSTRAP_4H  = 100;   // ~16 days of 4H bars
-const BOOTSTRAP_D1  = 100;   // 100 daily bars — key levels + SFU level detection
-const BOOTSTRAP_W1  = 60;    // 1 year of weekly bars (increased for W Breakout pattern detection)
-const BOOTSTRAP_MO  = 4;     // 3 completed months + forming
+const BOOTSTRAP_1H  = 500;
+const BOOTSTRAP_4H  = 100;
+const BOOTSTRAP_D1  = 100;
+const BOOTSTRAP_W1  = 60;
+const BOOTSTRAP_MO  = 4;
 const BUFFER_MAX_5M = 150;
 const BUFFER_MAX_1H = 550;
 const BUFFER_MAX_4H = 110;
@@ -56,16 +46,14 @@ let reconnectDelay = RECONNECT_BASE_MS;
 let disconnectedAt = 0;
 let shuttingDown   = false;
 
-// Bar = { time, open, high, low, close, vol }
-const klineBuffers = new Map();   // symbol → { m5: Bar[], h1: Bar[] }
+const klineBuffers = new Map();   // symbol → { m5, h1, h4, d1, w1 }
 const levelCache   = new Map();   // symbol → Levels object
-const lastWsTs     = new Map();   // "SYMBOL:Min5" → epochSeconds
-const pendingBar   = new Map();   // "SYMBOL:Min5" → forming bar data from WS
+const lastWsTs     = new Map();   // "SYMBOL:interval" → epochSeconds
+const pendingBar   = new Map();   // "SYMBOL:interval" → forming bar data
 let   topSymbols   = [];
-const alerted      = new Map();   // "SYMBOL:long" | "SYMBOL:short" → timestamp
-const alertedSFU   = new Map();   // "SYMBOL:long" | "SYMBOL:short" → timestamp (SFU dedup)
-const alertedWBO   = new Map();   // "SYMBOL:TF:necklineKey:stage" → timestamp (W Breakout dedup)
-const wboStage1    = new Map();   // "SYMBOL:TF" → { neckline, nk } — pending stage 2 watch
+const alerted      = new Map();   // "SYMBOL:direction:levelKey" → timestamp
+const alertedLJ    = new Map();   // "SYMBOL:TF:direction:neckKey:stage" → timestamp
+const ljStage1     = new Map();   // "SYMBOL:TF:direction" → { neckline, nk }
 
 let candleCloseCount = 0;
 
@@ -80,12 +68,12 @@ function wasAlertedRecently(symbol, direction, levelKey) {
 function markAlerted(symbol, direction, levelKey) {
   alerted.set(`${symbol}:${direction}:${levelKey}`, Date.now());
 }
-function wasAlertedSFURecently(symbol, direction) {
-  const ts = alertedSFU.get(`${symbol}:${direction}`);
-  return ts != null && Date.now() - ts < ALERT_RESET_SFU_MS;
+function wasAlertedLJRecently(symbol, tf, direction, dedupKey) {
+  const ts = alertedLJ.get(`${symbol}:${tf}:${direction}:${dedupKey}`);
+  return ts != null && Date.now() - ts < ALERT_RESET_LJ_MS;
 }
-function markAlertedSFU(symbol, direction) {
-  alertedSFU.set(`${symbol}:${direction}`, Date.now());
+function markAlertedLJ(symbol, tf, direction, dedupKey) {
+  alertedLJ.set(`${symbol}:${tf}:${direction}:${dedupKey}`, Date.now());
 }
 
 // ── REST ───────────────────────────────────────────────────────────────────────
@@ -100,8 +88,6 @@ async function restGet(path) {
 }
 
 // ── Kline parser ───────────────────────────────────────────────────────────────
-// excludeLast=true  → skip the forming (still-open) bar — use for history
-// excludeLast=false → include it — use to get the forming bar's open price
 function parseKlines(d, excludeLast = true) {
   if (!d || !Array.isArray(d.time) || !d.time.length) return [];
   const end = excludeLast ? d.time.length - 1 : d.time.length;
@@ -116,12 +102,8 @@ function parseKlines(d, excludeLast = true) {
 }
 
 // ── Key level computation ─────────────────────────────────────────────────────
-// W pattern (LONG)  only fires at support levels (below price).
-// M pattern (SHORT) only fires at resistance levels (above price).
-// Session levels are computed live from the H1 buffer — not stored in levelCache.
 const LONG_LEVELS    = ['PML', 'PWL', 'mondayLow',  'weeklyOpen', 'londonLow',  'asiaLow'];
 const SHORT_LEVELS   = ['PMH', 'PWH', 'mondayHigh', 'weeklyOpen', 'londonHigh', 'asiaHigh'];
-// Session levels expire 2H after their session closes — use shorter dedup window
 const SESSION_LEVELS = new Set(['asiaHigh', 'asiaLow', 'londonHigh', 'londonLow']);
 
 const LEVEL_DISPLAY = {
@@ -139,17 +121,14 @@ const LEVEL_DISPLAY = {
 };
 
 function computeLevels(d1Comp, w1Comp, w1Forming, moComp) {
-  const lastWeek   = w1Comp.at(-1) ?? null;   // last COMPLETED week bar
-  const lastMonth  = moComp.at(-1) ?? null;   // last COMPLETED month bar
-
-  // Monday bar valid only when its full 24h window has passed.
+  const lastWeek   = w1Comp.at(-1) ?? null;
+  const lastMonth  = moComp.at(-1) ?? null;
   const nowSec     = Date.now() / 1000;
   const mondays    = d1Comp.filter(b =>
     new Date(b.time * 1000).getUTCDay() === 1 &&
     (b.time + 86400) < nowSec
   );
   const lastMonday = (new Date().getUTCDay() !== 1) ? (mondays.at(-1) ?? null) : null;
-
   return {
     PWH:        lastWeek?.high   ?? null,
     PWL:        lastWeek?.low    ?? null,
@@ -197,28 +176,25 @@ async function bootstrapKlines(symbols) {
         restGet(`/api/v1/contract/kline/${symbol}?interval=Week1&limit=${BOOTSTRAP_W1}`),
         restGet(`/api/v1/contract/kline/${symbol}?interval=Month1&limit=${BOOTSTRAP_MO}`),
       ]);
-
       const d1Comp    = parseKlines(rawD1, true);
-      const w1CompBuf = parseKlines(rawW1, true);
+      const w1Comp    = parseKlines(rawW1, true);
+      const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
+      const moComp    = parseKlines(rawMo, true);
       klineBuffers.set(symbol, {
         m5: parseKlines(raw5m),
         h1: parseKlines(raw1h),
         h4: parseKlines(raw4h),
         d1: d1Comp,
-        w1: w1CompBuf,
+        w1: w1Comp,
       });
-      const w1Comp    = parseKlines(rawW1, true);
-      const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
-      const moComp    = parseKlines(rawMo, true);
-
       levelCache.set(symbol, computeLevels(d1Comp, w1Comp, w1Forming, moComp));
       ok++;
     } catch (err) {
       console.error(`[scanner] Bootstrap ${symbol}: ${err.message}`);
-      klineBuffers.set(symbol, { m5: [], h1: [], h4: [], d1: [] });
+      klineBuffers.set(symbol, { m5: [], h1: [], h4: [], d1: [], w1: [] });
       levelCache.set(symbol, {});
     }
-    await sleep(800);   // ~1.25 symbols/s — back off to avoid MEXC rate limit (code 510)
+    await sleep(800);
   }
   console.log(`[scanner] Bootstrap done: ${ok}/${symbols.length} symbols`);
 }
@@ -239,7 +215,6 @@ async function refreshLevels() {
       const w1Forming = parseKlines(rawW1, false).at(-1) ?? null;
       const moComp    = parseKlines(rawMo, true);
       levelCache.set(symbol, computeLevels(d1Comp, w1Comp, w1Forming, moComp));
-      // Also refresh d1/w1 klineBuffers (used for SFU and W Breakout detection)
       const buf = klineBuffers.get(symbol);
       if (buf) { buf.d1 = d1Comp; buf.w1 = w1Comp; }
       ok++;
@@ -249,12 +224,6 @@ async function refreshLevels() {
     await sleep(600);
   }
   console.log(`[scanner] Level refresh done: ${ok}/${topSymbols.length}`);
-  // Scan D1 and W1 W Breakout patterns after every level refresh
-  for (const symbol of topSymbols) {
-    detectWBreakout(symbol, ['D1', 'W1']).catch(err =>
-      console.error(`[wbo] D1/W1 scan ${symbol}: ${err.message}`)
-    );
-  }
 }
 
 // ── Buffer update ─────────────────────────────────────────────────────────────
@@ -272,103 +241,59 @@ function pushBarToBuffer(symbol, interval, bar) {
   if (arr.length > max) arr.shift();
 }
 
-// ── W / M structure detection ─────────────────────────────────────────────────
-// W (long SFP):
-//   1. A bar in the last 4 wicked BELOW level (the sweep)
-//   2. Current bar closes ABOVE level AND above sweep bar's close
-//   3. Current bar closes ABOVE the price neckline = highest high of bars
-//      between the sweep bar and current (confirms W break, not just recovery)
-//   When sweep bar is directly before current (no bars in between), step 3
-//   is satisfied by condition 2 alone.
-// W (long SFP) — all 4 rules required:
-//   1. Right low bar wicks BELOW level (sweep)
-//   2. Current bar closes ABOVE level
-//   3. Right low close > left low close (higher low = second touch higher than first)
-//   4. Current bar closes ABOVE neckline (highest high between left low and right low)
+// ── W / M structure detection (SFP) ──────────────────────────────────────────
 function detectWPattern(bars5m, level) {
   if (bars5m.length < 6) return false;
   const last = bars5m.at(-1);
-  if (last.close <= level) return false;        // rule 2: current bar above level
-
+  if (last.close <= level) return false;
   const n       = bars5m.length;
-  const MIN_GAP = 3;  // minimum bars between left and right lows (15 min on 5m)
-
-  // Search last 4 closed bars for the right low (sweep bar)
+  const MIN_GAP = 3;
   for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
     const rightBar = bars5m[ri];
-    if (rightBar.low >= level) continue;        // rule 1: must wick below level
-
-    // Approach check: price must come from ABOVE before the sweep bar.
-    // At least 3 of the 5 bars before ri must close above the level.
+    if (rightBar.low >= level) continue;
     const approachBars = bars5m.slice(Math.max(0, ri - 5), ri);
     if (approachBars.filter(b => b.close > level).length < 3) continue;
-
-    // Fixes 1+2+3: search ALL left-low candidates with gap >= MIN_GAP.
-    // No early break — evaluate every candidate.
-    // Track highest neckline (fix 3) = most structurally significant W.
     let bestNeckline = -Infinity;
-
     for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 20); li--) {
-      if (bars5m[li].low > level) continue;                 // must touch/sweep level
-      if (rightBar.close <= bars5m[li].close) continue;     // rule 3: right close must be higher
-
+      if (bars5m[li].low > level) continue;
+      if (rightBar.close <= bars5m[li].close) continue;
       const midBars = bars5m.slice(li + 1, ri);
       if (midBars.length === 0) continue;
       const neckline = Math.max(...midBars.map(b => b.high));
-      if (neckline > bestNeckline) bestNeckline = neckline; // fix 3: keep highest neckline
+      if (neckline > bestNeckline) bestNeckline = neckline;
     }
-
-    if (bestNeckline === -Infinity) continue;   // no valid left low found
-    if (last.close > bestNeckline) return true; // rule 4: confirmed break above neckline
+    if (bestNeckline === -Infinity) continue;
+    if (last.close > bestNeckline) return true;
   }
   return false;
 }
 
-// M (short SFP) — all 4 rules required:
-//   1. Right high bar wicks ABOVE level (sweep)
-//   2. Current bar closes BELOW level
-//   3. Right high close < left high close (lower high = second touch lower than first)
-//   4. Current bar closes BELOW neckline (lowest low between left high and right high)
 function detectMPattern(bars5m, level) {
   if (bars5m.length < 6) return false;
   const last = bars5m.at(-1);
-  if (last.close >= level) return false;        // rule 2: current bar below level
-
+  if (last.close >= level) return false;
   const n       = bars5m.length;
-  const MIN_GAP = 3;  // minimum bars between left and right highs (15 min on 5m)
-
-  // Search last 4 closed bars for the right high (sweep bar)
+  const MIN_GAP = 3;
   for (let ri = n - 2; ri >= Math.max(n - 5, 1); ri--) {
     const rightBar = bars5m[ri];
-    if (rightBar.high <= level) continue;       // rule 1: must wick above level
-
-    // Approach check: price must come from BELOW before the sweep bar.
-    // At least 3 of the 5 bars before ri must close below the level.
+    if (rightBar.high <= level) continue;
     const approachBars = bars5m.slice(Math.max(0, ri - 5), ri);
     if (approachBars.filter(b => b.close < level).length < 3) continue;
-
-    // Fixes 1+2+3: search ALL left-high candidates with gap >= MIN_GAP.
-    // No early break — evaluate every candidate.
-    // Track lowest neckline (fix 3) = most structurally significant M.
     let bestNeckline = Infinity;
-
     for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 20); li--) {
-      if (bars5m[li].high < level) continue;                // must touch/sweep level
-      if (rightBar.close >= bars5m[li].close) continue;     // rule 3: right close must be lower
-
+      if (bars5m[li].high < level) continue;
+      if (rightBar.close >= bars5m[li].close) continue;
       const midBars = bars5m.slice(li + 1, ri);
       if (midBars.length === 0) continue;
       const neckline = Math.min(...midBars.map(b => b.low));
-      if (neckline < bestNeckline) bestNeckline = neckline; // fix 3: keep lowest neckline
+      if (neckline < bestNeckline) bestNeckline = neckline;
     }
-
-    if (bestNeckline === Infinity) continue;    // no valid left high found
-    if (last.close < bestNeckline) return true; // rule 4: confirmed break below neckline
+    if (bestNeckline === Infinity) continue;
+    if (last.close < bestNeckline) return true;
   }
   return false;
 }
 
-// Returns highest-priority level that was swept, or null.
 function findSweepLevel(bars5m, levels, direction) {
   const keys = direction === 'long' ? LONG_LEVELS : SHORT_LEVELS;
   for (const key of keys) {
@@ -380,7 +305,7 @@ function findSweepLevel(bars5m, levels, direction) {
   return null;
 }
 
-// ── RSI (Wilder smoothing, period 14) ────────────────────────────────────────
+// ── RSI (Wilder smoothing, period 14) ─────────────────────────────────────────
 function calcRSI(closes, period = 14) {
   const rsi = new Array(period).fill(NaN);
   if (closes.length <= period) return rsi;
@@ -423,7 +348,6 @@ function calcEMA(data, period) {
 }
 
 function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
-  // Return NaN-filled array if not enough data so divergence check fails cleanly
   if (closes.length < slow + signal) return new Array(closes.length).fill(NaN);
   const emaFast    = calcEMA(closes, fast);
   const emaSlow    = calcEMA(closes, slow);
@@ -433,166 +357,98 @@ function calcMACDHistogram(closes, fast = 12, slow = 26, signal = 9) {
 }
 
 // ── Generic divergence with neckline confirmation ─────────────────────────────
-//
-// Bull (long):
-//   1. Find 2 structural swing lows using bar.low (wick-based, not close-based)
-//   2. bar[i2].close < bar[i1].close — price closed lower at the second low
-//   3. Indicator at i2 > indicator at i1 (higher low = divergence)
-//   4. Neckline = highest indicator value between i1 and i2
-//   5. CONFIRMED only when current indicator > neckline (W break in indicator)
-//
-// Bear (short):
-//   1. Find 2 structural swing highs using bar.high (wick-based)
-//   2. bar[i2].close > bar[i1].close — price closed higher at the second high
-//   3. Indicator at i2 < indicator at i1 (lower high = divergence)
-//   4. Neckline = lowest indicator value between i1 and i2
-//   5. CONFIRMED only when current indicator < neckline (M break in indicator)
-//
-// Pivot detection uses bar.high / bar.low so sweep wicks register as pivots.
-// Price direction comparison uses bar.close (CTA: divergence drawn off closes).
-// Pivot search window: 20–60 bars ago (100 min – 5 h on 5m).
-// Pivot confirmation wing: 5 bars on each side must be a local extreme.
-// minDiffRatio: minimum relative indicator difference (pass 0.005 for OBV).
 function checkDivergence(bars, indicatorValues, direction, minDiffRatio = 0) {
-  const WING        = 5;   // bars on each side to confirm pivot is a local extreme
-  const MIN_AGO     = 20;  // pivot must be ≥ 20 bars ago (100 min) — no micro-pivots
-  const MAX_AGO     = 60;  // pivot must be ≤ 60 bars ago (5 h)   — no stale pivots
-
+  const WING        = 5;
+  const MIN_AGO     = 20;
+  const MAX_AGO     = 60;
   const n           = bars.length;
   const searchStart = Math.max(WING, n - MAX_AGO);
-  const searchEnd   = n - MIN_AGO;  // exclusive; ensures pivot is ≥ MIN_AGO bars back
-
+  const searchEnd   = n - MIN_AGO;
   if (searchEnd <= searchStart) return false;
-
   const highs = [], lows = [];
   for (let i = searchStart; i < searchEnd; i++) {
     let isH = true, isL = true;
     for (let j = i - WING; j <= i + WING; j++) {
       if (j < 0 || j >= n || j === i) continue;
-      if (bars[j].high >= bars[i].high) isH = false;  // swing high: bar[i].high > all neighbours
-      if (bars[j].low  <= bars[i].low)  isL = false;  // swing low:  bar[i].low  < all neighbours
+      if (bars[j].high >= bars[i].high) isH = false;
+      if (bars[j].low  <= bars[i].low)  isL = false;
       if (!isH && !isL) break;
     }
     if (isH) highs.push(i);
     if (isL)  lows.push(i);
   }
-
   const currentInd = indicatorValues.at(-1);
   if (!isFinite(currentInd)) return false;
-
   if (direction === 'short') {
     const [i1, i2] = highs.slice(-2);
     if (i1 == null || i2 == null) return false;
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
-    if (!(bars[i2].close > bars[i1].close && v2 < v1)) return false;  // HH close, LH indicator
-    // Minimum meaningful difference between pivot values
+    if (!(bars[i2].close > bars[i1].close && v2 < v1)) return false;
     if (minDiffRatio > 0 && Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1) < minDiffRatio) return false;
-    // Neckline = lowest indicator value between the two swing highs
     const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
     if (!between.length) return false;
-    const neckline = Math.min(...between);
-    return currentInd < neckline;   // confirmed: current breaks below M neckline
+    return currentInd < Math.min(...between);
   } else {
     const [i1, i2] = lows.slice(-2);
     if (i1 == null || i2 == null) return false;
     const v1 = indicatorValues[i1], v2 = indicatorValues[i2];
     if (!isFinite(v1) || !isFinite(v2)) return false;
-    if (!(bars[i2].close < bars[i1].close && v2 > v1)) return false;  // LL close, HL indicator
-    // Minimum meaningful difference between pivot values
+    if (!(bars[i2].close < bars[i1].close && v2 > v1)) return false;
     if (minDiffRatio > 0 && Math.abs(v2 - v1) / Math.max(Math.abs(v1), Math.abs(v2), 1) < minDiffRatio) return false;
-    // Neckline = highest indicator value between the two swing lows
     const between = indicatorValues.slice(i1, i2 + 1).filter(isFinite);
     if (!between.length) return false;
-    const neckline = Math.max(...between);
-    return currentInd > neckline;   // confirmed: current breaks above W neckline
+    return currentInd > Math.max(...between);
   }
 }
 
-function checkRSIDivergence(bars5m, direction) {
-  const closes = bars5m.map(b => b.close);
-  return checkDivergence(bars5m, calcRSI(closes), direction);
+function checkRSIDivergence(bars, direction) {
+  return checkDivergence(bars, calcRSI(bars.map(b => b.close)), direction);
+}
+function checkOBVDivergence(bars, direction) {
+  return checkDivergence(bars, calcOBV(bars), direction, 0.005);
+}
+function checkMACDDivergence(bars, direction) {
+  return checkDivergence(bars, calcMACDHistogram(bars.map(b => b.close)), direction);
 }
 
-function checkOBVDivergence(bars5m, direction) {
-  // 0.5% minimum difference: OBV trending in same direction as price ≠ divergence
-  return checkDivergence(bars5m, calcOBV(bars5m), direction, 0.005);
-}
-
-function checkMACDDivergence(bars5m, direction) {
-  const closes = bars5m.map(b => b.close);
-  return checkDivergence(bars5m, calcMACDHistogram(closes), direction);
-}
-
-// ── GS Location — 1H significant pivot fib zone check ────────────────────────
-//
-// Significant Pivot High: 1H bar whose high is strictly above ALL 8 bars on
-//   each side — this is the M-top / swing high where sellers took over.
-// Significant Pivot Low:  1H bar whose low is strictly below ALL 8 bars on
-//   each side — this is the W-bottom / swing low where buyers took over.
-//
-// Market state determined from last 2 sig pivot highs + last 2 sig pivot lows:
-//   RANGE     = both highs roughly equal AND both lows roughly equal (≤2% diff)
-//   UPTREND   = higher highs + higher lows
-//   DOWNTREND = lower highs + lower lows
-//   (mixed / unclear → return null, no location forced)
-//
-// Fib zones (fib always drawn between most recent sig high and sig low):
-//   Range  LONG  — L.RLZ  0.618–0.786 retracement from high toward low
-//   Range  SHORT — S.RLZ  0.618–0.786 retracement from low toward high
-//   Uptrend LONG    — P.CZ  0.382–0.500 pullback from swing high
-//   Downtrend SHORT — D.CZ  0.382–0.500 bounce from swing low
+// ── GS Location (1H fib zone) ─────────────────────────────────────────────────
 function checkGSLocation(bars1h, direction, currentPrice) {
-  const WING      = 8;      // bars required on each side of a significant pivot
-  const RANGE_TOL = 0.02;   // 2%  — "roughly equal" threshold for market state
-  const EXACT_TOL = 0.01;   // ±1% ratio window for MM (0.618) / SHARK (0.786) labels
-
+  const WING      = 8;
+  const RANGE_TOL = 0.02;
+  const EXACT_TOL = 0.01;
   if (bars1h.length < WING * 2 + 5) return null;
-
-  // Scan for significant pivots (stop early when both flags go false)
-  const sigHighs = [];
-  const sigLows  = [];
-
+  const sigHighs = [], sigLows = [];
   for (let i = WING; i < bars1h.length - WING; i++) {
-    const pivH = bars1h[i].high;
-    const pivL = bars1h[i].low;
+    const pivH = bars1h[i].high, pivL = bars1h[i].low;
     let isHigh = true, isLow = true;
-
     for (let j = i - WING; j <= i + WING; j++) {
       if (j === i) continue;
       if (bars1h[j].high >= pivH) isHigh = false;
       if (bars1h[j].low  <= pivL) isLow  = false;
       if (!isHigh && !isLow) break;
     }
-
-    if (isHigh) sigHighs.push({ index: i, price: pivH });
-    if (isLow)   sigLows.push({ index: i, price: pivL });
+    if (isHigh) sigHighs.push({ price: pivH });
+    if (isLow)   sigLows.push({ price: pivL });
   }
-
   if (sigHighs.length < 2 || sigLows.length < 2) return null;
-
-  // Market state: compare the two most recent pivots of each type
-  const [h1, h2] = sigHighs.slice(-2);   // h1 = older, h2 = more recent
-  const [l1, l2] = sigLows.slice(-2);    // l1 = older, l2 = more recent
-
+  const [h1, h2] = sigHighs.slice(-2);
+  const [l1, l2] = sigLows.slice(-2);
   const highsEqual  = Math.abs(h2.price - h1.price) / h1.price <= RANGE_TOL;
   const lowsEqual   = Math.abs(l2.price - l1.price) / l1.price <= RANGE_TOL;
   const higherHighs = !highsEqual && h2.price > h1.price;
   const higherLows  = !lowsEqual  && l2.price > l1.price;
   const lowerHighs  = !highsEqual && h2.price < h1.price;
   const lowerLows   = !lowsEqual  && l2.price < l1.price;
-
   let marketState;
   if      (highsEqual  && lowsEqual)  marketState = 'range';
   else if (higherHighs && higherLows) marketState = 'uptrend';
   else if (lowerHighs  && lowerLows)  marketState = 'downtrend';
-  else return null;   // mixed structure — do not force a location
-
+  else return null;
   const lastHigh = sigHighs.at(-1).price;
   const lastLow  = sigLows.at(-1).price;
   const range    = lastHigh - lastLow;
   if (range <= 0) return null;
-
   if (marketState === 'range') {
     if (direction === 'long') {
       const ratio = (lastHigh - currentPrice) / range;
@@ -608,34 +464,29 @@ function checkGSLocation(bars1h, direction, currentPrice) {
       return 'S.RLZ (0.618-0.786)';
     }
   }
-
   if (marketState === 'uptrend' && direction === 'long') {
     const ratio = (lastHigh - currentPrice) / range;
     if (ratio >= 0.382 && ratio <= 0.500) return 'P.CZ (0.382-0.500)';
   }
-
   if (marketState === 'downtrend' && direction === 'short') {
     const ratio = (currentPrice - lastLow) / range;
     if (ratio >= 0.382 && ratio <= 0.500) return 'D.CZ (0.382-0.500)';
   }
-
   return null;
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
-// rank = 1 + (hasLocation<<3 | hasOBV<<2 | hasRSI<<1 | hasMACD)
-// This produces the exact 16-entry table from the spec without a lookup table.
 function calcRank(hasLocation, hasOBV, hasRSI, hasMACD) {
   return 1 + ((hasLocation ? 8 : 0) | (hasOBV ? 4 : 0) | (hasRSI ? 2 : 0) | (hasMACD ? 1 : 0));
 }
 
-// ── Symbol display name overrides ─────────────────────────────────────────────
+// ── Symbol display names ──────────────────────────────────────────────────────
 const SYMBOL_DISPLAY_NAMES = {
   'TRUMPOFFICIAL_USDT': 'TRUMP',
   'BIANRENSHENG_USDT':  '币安人生',
 };
 
-// ── Alert builder ─────────────────────────────────────────────────────────────
+// ── SFP Alert builder ─────────────────────────────────────────────────────────
 function buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
   const coin     = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
   const dir      = direction === 'long' ? 'LONG' : 'SHORT';
@@ -643,7 +494,6 @@ function buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, 
   const time     = new Date().toISOString().slice(11, 16) + ' UTC';
   const swept    = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
   const locStr   = hasLocation ? `${locZone} ✅` : '❌';
-
   return [
     `${dirEmoji} <b>${coin} ${dir} ${rank}/16</b>`,
     `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} (${levelPrice.toPrecision(6)}) ${swept}`,
@@ -656,10 +506,7 @@ function buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, 
 async function sendTelegram(text) {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) {
-    console.warn('[scanner] TELEGRAM env vars not set — alert skipped');
-    return;
-  }
+  if (!token || !chatId) { console.warn('[scanner] TELEGRAM env vars not set — alert skipped'); return; }
   try {
     const res = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
       method: 'POST',
@@ -667,38 +514,23 @@ async function sendTelegram(text) {
       body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
       signal: AbortSignal.timeout(8_000),
     });
-    if (!res.ok) {
-      const err = await res.text();
-      console.error(`[scanner] Telegram error: ${err.slice(0, 200)}`);
-    }
+    if (!res.ok) console.error(`[scanner] Telegram error: ${(await res.text()).slice(0, 200)}`);
   } catch (err) {
     console.error(`[scanner] Telegram failed: ${err.message}`);
   }
 }
 
-// ── Session level computation (derived live from H1 buffer) ──────────────────
-// H1 buffer holds 550 bars (~23 days) — always enough to cover today's sessions.
-// Asia   session: 00:00–08:00 UTC — valid 08:00–10:00 UTC only (2H window)
-// London session: 08:00–16:00 UTC — valid 16:00–18:00 UTC only (2H window)
-// Outside these windows the level is null so SFP cannot fire on a stale level.
+// ── Session level computation ─────────────────────────────────────────────────
 function computeSessionLevels(h1Bars) {
   const now  = new Date();
   const nowH = now.getUTCHours();
-  const todayMidnight = Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()
-  ) / 1000;
-
-  const asiaStart   = todayMidnight;
-  const asiaEnd     = todayMidnight + 8  * 3600;
-  const londonStart = asiaEnd;
-  const londonEnd   = todayMidnight + 16 * 3600;
-
+  const todayMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000;
+  const asiaStart = todayMidnight, asiaEnd = todayMidnight + 8 * 3600;
+  const londonStart = asiaEnd,    londonEnd = todayMidnight + 16 * 3600;
   const asiaBars   = h1Bars.filter(b => b.time >= asiaStart   && b.time < asiaEnd);
   const londonBars = h1Bars.filter(b => b.time >= londonStart && b.time < londonEnd);
-
   const asiaValid   = nowH >= 8  && nowH < 10 && asiaBars.length   > 0;
   const londonValid = nowH >= 16 && nowH < 18 && londonBars.length > 0;
-
   return {
     asiaHigh:   asiaValid   ? Math.max(...asiaBars.map(b => b.high))   : null,
     asiaLow:    asiaValid   ? Math.min(...asiaBars.map(b => b.low))    : null,
@@ -707,409 +539,255 @@ function computeSessionLevels(h1Bars) {
   };
 }
 
-// ── SFU level computation ─────────────────────────────────────────────────────
-// Find the most recent confirmed swing high in a bar array.
-// WING bars on each side must all have a strictly lower high.
-function nearestSwingHigh(bars, wing = 2) {
-  const n = bars.length;
-  for (let i = n - 1 - wing; i >= wing; i--) {
-    let ok = true;
-    for (let j = i - wing; j <= i + wing; j++) {
-      if (j !== i && bars[j].high >= bars[i].high) { ok = false; break; }
-    }
-    if (ok) return bars[i].high;
-  }
-  return null;
-}
-
-// Find the most recent confirmed swing low in a bar array.
-function nearestSwingLow(bars, wing = 2) {
-  const n = bars.length;
-  for (let i = n - 1 - wing; i >= wing; i--) {
-    let ok = true;
-    for (let j = i - wing; j <= i + wing; j++) {
-      if (j !== i && bars[j].low <= bars[i].low) { ok = false; break; }
-    }
-    if (ok) return bars[i].low;
-  }
-  return null;
-}
-
-// Returns nearest swing pivot high/low for 4H, Daily, and Weekly (minimum TF = 4H).
-// 1H is intentionally excluded — SFU levels must come from significant HTF structure.
-function computeSFULevels(bars4h, bars1d, barsW1) {
-  return {
-    h4High: bars4h.length  >= 5 ? nearestSwingHigh(bars4h)  : null,
-    d1High: bars1d.length  >= 5 ? nearestSwingHigh(bars1d)  : null,
-    w1High: barsW1.length  >= 5 ? nearestSwingHigh(barsW1)  : null,
-    h4Low:  bars4h.length  >= 5 ? nearestSwingLow(bars4h)   : null,
-    d1Low:  bars1d.length  >= 5 ? nearestSwingLow(bars1d)   : null,
-    w1Low:  barsW1.length  >= 5 ? nearestSwingLow(barsW1)   : null,
-  };
-}
-
-const SFU_TF_STARS = { W1: '⭐⭐⭐', '1D': '⭐⭐', '4H': '⭐' };
-
-// Returns { level, tf } when the current 5m bar's WICK sweeps a swing pivot
-// and the CLOSE comes back inside — exact wick tip sweep, not a body touch.
-//   SHORT SFU: curr.high > pivot high  &&  curr.close < pivot high
-//   LONG  SFU: curr.low  < pivot low   &&  curr.close > pivot low
-// Priority order: Weekly → Daily → 4H (highest timeframe wins).
-function detectSFU(bars5m, sfuLevels, direction) {
-  if (bars5m.length < 1) return null;
-  const curr = bars5m.at(-1);
-  const { h4High, d1High, w1High, h4Low, d1Low, w1Low } = sfuLevels;
-
-  if (direction === 'short') {
-    if (w1High != null && curr.high > w1High && curr.close < w1High) return { level: w1High, tf: 'W1' };
-    if (d1High != null && curr.high > d1High && curr.close < d1High) return { level: d1High, tf: '1D' };
-    if (h4High != null && curr.high > h4High && curr.close < h4High) return { level: h4High, tf: '4H' };
-  }
-  if (direction === 'long') {
-    if (w1Low  != null && curr.low  < w1Low  && curr.close > w1Low)  return { level: w1Low,  tf: 'W1' };
-    if (d1Low  != null && curr.low  < d1Low  && curr.close > d1Low)  return { level: d1Low,  tf: '1D' };
-    if (h4Low  != null && curr.low  < h4Low  && curr.close > h4Low)  return { level: h4Low,  tf: '4H' };
-  }
-  return null;
-}
-
-// ── SFU alert builders ────────────────────────────────────────────────────────
-// sfuResult = { level, tf }  (tf = "4H" | "1D" | "W1")
-// Priority stars: W1 = ⭐⭐⭐  1D = ⭐⭐  4H = ⭐
-// Case A: SFU detected, no SFP
-function buildSFUAlert(symbol, direction, sfuResult, hasLocation, locZone, hasOBV, hasRSI, hasMACD) {
-  const coin      = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
-  const dir       = direction === 'long' ? 'LONG' : 'SHORT';
-  const dirEmoji  = direction === 'long' ? '🟢' : '🔴';
-  const side      = direction === 'long' ? 'Low' : 'High';
-  const stars     = SFU_TF_STARS[sfuResult.tf] || '';
-  const time      = new Date().toISOString().slice(11, 16) + ' UTC';
-  const locStr    = hasLocation ? `${locZone} ✅` : '❌';
-
-  return [
-    `${dirEmoji} <b>🚀 SFU ${dir} — ${coin} | 5M close</b> ${stars}`,
-    `Swept level: ${sfuResult.tf} ${side} @ $${sfuResult.level.toPrecision(6)}`,
-    `Confluence: RSI divergence ${hasRSI ? '✅' : '❌'} | OBV ${hasOBV ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
-    `Location: ${locStr}`,
-    `Time: ${time}`,
-  ].join('\n');
-}
-
-// Case B: SFU + SFP both confirmed — merged alert
-function buildMergedAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult) {
-  const coin      = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
-  const dir       = direction === 'long' ? 'LONG' : 'SHORT';
-  const dirEmoji  = direction === 'long' ? '🟢' : '🔴';
-  const sfpStr    = direction === 'long' ? 'swept (W structure confirmed)' : 'swept (M structure confirmed)';
-  const side      = direction === 'long' ? 'Low' : 'High';
-  const stars     = SFU_TF_STARS[sfuResult.tf] || '';
-  const time      = new Date().toISOString().slice(11, 16) + ' UTC';
-  const locStr    = hasLocation ? `${locZone} ✅` : '❌';
-
-  return [
-    `${dirEmoji} <b>${coin} ${dir} ${rank}/16 🚀SFU</b> ${stars}`,
-    `Level: ${LEVEL_DISPLAY[levelKey] || levelKey} (${levelPrice.toPrecision(6)}) ${sfpStr}`,
-    `SFU: ${sfuResult.tf} ${side} swept (level=${sfuResult.level.toPrecision(6)}) ✅`,
-    `Location: ${locStr} | OBV ${hasOBV ? '✅' : '❌'} | RSI ${hasRSI ? '✅' : '❌'} | MACD ${hasMACD ? '✅' : '❌'}`,
-    `Time: ${time}`,
-  ].join('\n');
-}
-
-// ── Signal detection (runs on each 5m candle close) ───────────────────────────
-// Three cases per direction:
-//   Case B — SFP + SFU both confirmed → merged alert (highest priority)
-//   Case C — SFP only, rank ≥ 2       → normal SFP alert
-//   Case A — SFU only, no SFP         → SFU-only alert
+// ── SFP detection (5m candle close) ──────────────────────────────────────────
 async function detectSFP(symbol) {
   try {
     const buf = klineBuffers.get(symbol);
     if (!buf) return;
-    const { m5, h1, h4, d1 } = buf;
+    const { m5, h1 } = buf;
     if (m5.length < 30 || h1.length < 50) return;
-
     const cached = levelCache.get(symbol);
     if (!cached || !Object.values(cached).some(v => v != null)) return;
     const levels = { ...cached, ...computeSessionLevels(h1) };
-
-    // Compute SFU levels once per symbol tick (1H + 4H + 1D)
-    // SFU alerts are restricted to BTC, ETH, SOL only
-    const SFU_SYMBOLS = new Set(['BTC_USDT', 'ETH_USDT', 'SOL_USDT']);
-    const sfuLevels = SFU_SYMBOLS.has(symbol) ? computeSFULevels(h4 ?? [], d1 ?? [], buf.w1 ?? []) : null;
-
     for (const direction of ['long', 'short']) {
-      const sfuAlerted = wasAlertedSFURecently(symbol, direction);
-
-      // Detect SFU only for whitelisted symbols
-      const sfuResult = (sfuLevels && !sfuAlerted)
-        ? detectSFU(m5, sfuLevels, direction)
-        : null;
-
-      // Find sweep level, then apply per-level dedup (session=4H, structural=8H)
       let sfpMatch = findSweepLevel(m5, levels, direction);
-      if (sfpMatch && wasAlertedRecently(symbol, direction, sfpMatch.key)) {
-        sfpMatch = null;
-      }
-
+      if (sfpMatch && wasAlertedRecently(symbol, direction, sfpMatch.key)) sfpMatch = null;
+      if (!sfpMatch) continue;
       const currentPrice = m5.at(-1).close;
-
-      // Compute location + momentum once (shared by all cases that need it)
-      let locZone = null, hasLocation = false;
-      let hasOBV = false, hasRSI = false, hasMACD = false;
-      let rank = 0;
-
-      const needsConfluence = sfpMatch != null || sfuResult != null;
-      if (needsConfluence) {
-        locZone     = checkGSLocation(h1, direction, currentPrice);
-        hasLocation = locZone != null;
-        hasOBV      = checkOBVDivergence(m5, direction);
-        hasRSI      = checkRSIDivergence(m5, direction);
-        hasMACD     = checkMACDDivergence(m5, direction);
-        rank        = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
-      }
-
-      // ── Case B: SFP + SFU merged ──────────────────────────────────────────
-      if (sfpMatch && sfuResult) {
-        if (rank < 2) {
-          console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} merged — rank 1/16, no confluence`);
-          continue;
-        }
-        const { key: levelKey, price: levelPrice } = sfpMatch;
-        console.log(
-          `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 + SFU | ` +
-          `level=${levelKey} sfuLevel=${sfuResult.level.toPrecision(6)} (${sfuResult.tf}) | ` +
-          `loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
-        );
-        await sendTelegram(
-          buildMergedAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD, sfuResult)
-        );
-        markAlerted(symbol, direction, levelKey);
-        markAlertedSFU(symbol, direction);
+      const locZone     = checkGSLocation(h1, direction, currentPrice);
+      const hasLocation = locZone != null;
+      const hasOBV      = checkOBVDivergence(m5, direction);
+      const hasRSI      = checkRSIDivergence(m5, direction);
+      const hasMACD     = checkMACDDivergence(m5, direction);
+      const rank        = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
+      if (rank < 2) {
+        console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
         continue;
       }
-
-      // ── Case C: SFP only ──────────────────────────────────────────────────
-      if (sfpMatch && !sfuResult) {
-        if (rank < 2) {
-          console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
-          continue;
-        }
-        const { key: levelKey, price: levelPrice } = sfpMatch;
-        console.log(
-          `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
-          `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
-        );
-        await sendTelegram(
-          buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
-        );
-        markAlerted(symbol, direction, levelKey);
-        continue;
-      }
-
-      // ── Case A: SFU only (no SFP match) ──────────────────────────────────
-      if (sfuResult && !sfpMatch) {
-        console.log(
-          `[scanner] ☆ ${symbol} ${direction.toUpperCase()} SFU | ` +
-          `sfuLevel=${sfuResult.level.toPrecision(6)} (${sfuResult.tf}) | ` +
-          `loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
-        );
-        await sendTelegram(
-          buildSFUAlert(symbol, direction, sfuResult, hasLocation, locZone, hasOBV, hasRSI, hasMACD)
-        );
-        markAlertedSFU(symbol, direction);
-      }
+      const { key: levelKey, price: levelPrice } = sfpMatch;
+      console.log(
+        `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
+        `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
+      );
+      await sendTelegram(buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD));
+      markAlerted(symbol, direction, levelKey);
     }
   } catch (err) {
     console.error(`[scanner] detectSFP ${symbol}: ${err.message}`);
   }
 }
 
-// ── W Breakout Scanner ─────────────────────────────────────────────────────────
-// Pattern order: consolidation (≥10 bars, range <15%) → L1 (first swing low)
-//   → MH (middle high / neckline) → L2 (second swing low, higher than L1, ≤3% above L1)
-//   Each leg (L1→MH, MH→L2) ≥ 8 bars.
-// Alert 1/2: current bar closes above neckline for first time.
-// Alert 2/2: after Alert 1, price retests neckline (low within ±1%) and closes back above.
-// Scanned on 4H candle close (via WS) and D1/W1 after every hourly REST refresh.
+// ── LJ Setup — Trendline Breakout + W/M Pattern ───────────────────────────────
+//
+// The trendline originates FROM the W bottom / M top structure, not random pivots.
+//
+// LONG: HTF ascending support trendline (3+ higher lows from W bottoms on 4H/D1/W1)
+//   Price retraces to test the ascending TL.
+//   A W pattern forms on 1H with BOTH lows touching the ascending TL (±2%).
+//   1H close above W neckline → Alert "LJ Long 1/2"  (trendline hold + neckline break)
+//   1H neckline retest + close back above → Alert "LJ Long 2/2" (retest confirmed)
+//
+// SHORT: HTF descending resistance trendline (3+ lower highs from M tops on 4H/D1/W1)
+//   Price rallies to test the descending TL.
+//   An M pattern forms on 1H with BOTH highs touching the descending TL (±2%).
+//   1H close below M neckline → Alert "LJ Short 1/2"  (trendline reject + neckline break)
+//   1H neckline retest + close back below → Alert "LJ Short 2/2" (retest confirmed)
 
-function isWboLocalLow(bars, i, wing = 3) {
-  const lo = bars[i].low;
-  for (let j = Math.max(0, i - wing); j <= Math.min(bars.length - 1, i + wing); j++) {
-    if (j !== i && bars[j].low <= lo) return false;
+function detectDowntrendTL(bars, wing = 2) {
+  const highs = [];
+  for (let i = wing; i < bars.length - wing; i++) {
+    let ok = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j !== i && bars[j].high >= bars[i].high) { ok = false; break; }
+    }
+    if (ok) highs.push({ time: bars[i].time, price: bars[i].high });
   }
-  return true;
-}
-
-function isWboLocalHigh(bars, i, wing = 3) {
-  const hi = bars[i].high;
-  for (let j = Math.max(0, i - wing); j <= Math.min(bars.length - 1, i + wing); j++) {
-    if (j !== i && bars[j].high >= hi) return false;
+  if (highs.length < 3) return null;
+  // Find most recent group of 3+ consecutive lower highs
+  for (let i = highs.length - 1; i >= 2; i--) {
+    if (highs[i].price < highs[i - 1].price && highs[i - 1].price < highs[i - 2].price) {
+      const p1 = highs[i - 2], p2 = highs[i];
+      const slope     = (p2.price - p1.price) / (p2.time - p1.time);
+      const intercept = p1.price - slope * p1.time;
+      return { slope, intercept };
+    }
   }
-  return true;
+  return null;
 }
 
-function checkWboConsolidation(bars) {
-  if (bars.length < 10) return false;
-  const hh = Math.max(...bars.map(b => b.high));
-  const ll = Math.min(...bars.map(b => b.low));
-  return ll > 0 && (hh - ll) / ll < 0.15;
+function detectUptrendTL(bars, wing = 2) {
+  const lows = [];
+  for (let i = wing; i < bars.length - wing; i++) {
+    let ok = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j !== i && bars[j].low <= bars[i].low) { ok = false; break; }
+    }
+    if (ok) lows.push({ time: bars[i].time, price: bars[i].low });
+  }
+  if (lows.length < 3) return null;
+  for (let i = lows.length - 1; i >= 2; i--) {
+    if (lows[i].price > lows[i - 1].price && lows[i - 1].price > lows[i - 2].price) {
+      const p1 = lows[i - 2], p2 = lows[i];
+      const slope     = (p2.price - p1.price) / (p2.time - p1.time);
+      const intercept = p1.price - slope * p1.time;
+      return { slope, intercept };
+    }
+  }
+  return null;
 }
 
-// Returns { neckline, l1Price, l2Price } or null.
-function detectWBreakoutPattern(bars) {
-  const n          = bars.length;
-  const MIN_LEG    = 8;
-  const MIN_CONSOL = 10;
-  if (n < MIN_CONSOL + MIN_LEG * 2 + 4) return null;
+function trendlineAt(tl, time) {
+  return tl.slope * time + tl.intercept;
+}
 
-  const last = bars[n - 1];
+// Detect W/M on 1H bars where both extremes TOUCH the trendline (±2% zone).
+// Returns { neckline } or null.
+// LONG W:  both lows touch ascending support TL; last 1H close above neckline.
+// SHORT M: both highs touch descending resistance TL; last 1H close below neckline.
+function detectLJPattern(bars1h, direction, tl) {
+  if (bars1h.length < 10) return null;
+  const last    = bars1h.at(-1);
+  const n       = bars1h.length;
+  const MIN_GAP = 2;
+  const TOUCH   = 0.02; // ±2% accepted as "touching" the trendline
 
-  for (let l2i = n - 2; l2i >= Math.max(MIN_CONSOL + MIN_LEG * 2, n - 21); l2i--) {
-    if (!isWboLocalLow(bars, l2i, 3)) continue;
-    const l2Price = bars[l2i].low;
-
-    const mhMax = l2i - MIN_LEG;
-    if (mhMax < MIN_CONSOL + MIN_LEG) continue;
-
-    for (let mhi = mhMax; mhi >= Math.max(MIN_CONSOL + MIN_LEG, mhMax - 20); mhi--) {
-      if (!isWboLocalHigh(bars, mhi, 3)) continue;
-      const neckline = bars[mhi].high;
-
-      if (last.close <= neckline) continue;   // must close above neckline
-
-      const l1Max = mhi - MIN_LEG;
-      if (l1Max < MIN_CONSOL) continue;
-
-      for (let l1i = l1Max; l1i >= Math.max(MIN_CONSOL, l1Max - 20); l1i--) {
-        if (!isWboLocalLow(bars, l1i, 3)) continue;
-        const l1Price = bars[l1i].low;
-
-        if (l2Price <= l1Price) continue;                          // L2 must be higher than L1
-        if ((l2Price - l1Price) / l1Price > 0.03) continue;        // within 3% of L1
-
-        const consolEnd   = l1i;
-        const consolStart = Math.max(0, consolEnd - MIN_CONSOL - 5);
-        const consolBars  = bars.slice(consolStart, consolEnd);
-        if (consolBars.length < MIN_CONSOL) continue;
-        if (!checkWboConsolidation(consolBars)) continue;
-
-        return { neckline, l1Price, l2Price };
+  if (direction === 'long') {
+    // W lows must touch the ascending support TL
+    for (let ri = n - 2; ri >= Math.max(n - 20, 1); ri--) {
+      const tlRi = trendlineAt(tl, bars1h[ri].time);
+      if (Math.abs(bars1h[ri].low - tlRi) / tlRi > TOUCH) continue;
+      for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 30); li--) {
+        const tlLi = trendlineAt(tl, bars1h[li].time);
+        if (Math.abs(bars1h[li].low - tlLi) / tlLi > TOUCH) continue;
+        const midBars = bars1h.slice(li + 1, ri);
+        if (!midBars.length) continue;
+        const neckline = Math.max(...midBars.map(b => b.high));
+        if (last.close > neckline) return { neckline };
+      }
+    }
+  } else {
+    // M highs must touch the descending resistance TL
+    for (let ri = n - 2; ri >= Math.max(n - 20, 1); ri--) {
+      const tlRi = trendlineAt(tl, bars1h[ri].time);
+      if (Math.abs(bars1h[ri].high - tlRi) / tlRi > TOUCH) continue;
+      for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 30); li--) {
+        const tlLi = trendlineAt(tl, bars1h[li].time);
+        if (Math.abs(bars1h[li].high - tlLi) / tlLi > TOUCH) continue;
+        const midBars = bars1h.slice(li + 1, ri);
+        if (!midBars.length) continue;
+        const neckline = Math.min(...midBars.map(b => b.low));
+        if (last.close < neckline) return { neckline };
       }
     }
   }
   return null;
 }
 
-function getWBOConfluence(bars) {
-  const closes = bars.map(b => b.close);
-  const n      = bars.length;
-
-  const rsiVals = calcRSI(closes);
-  const rsiNow  = rsiVals.at(-1);
-  const hasRSI  = isFinite(rsiNow) && rsiNow > 50;
-
+function getLJConfluence(bars1h, direction) {
+  const closes  = bars1h.map(b => b.close);
   const hist    = calcMACDHistogram(closes);
-  const histNow = hist.at(-1);
-  const histPrv = hist.at(-2);
-  const hasMACD = isFinite(histNow) && histNow > 0 && isFinite(histPrv) && histNow > histPrv;
-
-  const obvVals = calcOBV(bars);
-  const hasOBV  = n >= 6 && isFinite(obvVals.at(-1)) && obvVals.at(-1) > obvVals.at(-6);
-
-  return { hasRSI, hasMACD, hasOBV, rsiVal: isFinite(rsiNow) ? Math.round(rsiNow) : null };
+  const histNow = hist.at(-1), histPrv = hist.at(-2);
+  const hasRSI  = checkDivergence(bars1h, calcRSI(closes), direction);
+  const hasOBV  = checkDivergence(bars1h, calcOBV(bars1h), direction, 0.005);
+  const hasMACD = direction === 'long'
+    ? isFinite(histNow) && histNow > 0 && isFinite(histPrv) && histNow > histPrv
+    : isFinite(histNow) && histNow < 0 && isFinite(histPrv) && histNow < histPrv;
+  return { hasRSI, hasOBV, hasMACD };
 }
 
-function buildWBOAlert(symbol, tf, stage, neckline, breakoutClose, rsiVal, hasRSI, hasMACD, hasOBV) {
+function buildLJAlert(symbol, tf, direction, stage, neckline, entry, hasRSI, hasMACD, hasOBV) {
   const coin    = SYMBOL_DISPLAY_NAMES[symbol] || symbol.replace('_USDT', '');
+  const dir     = direction === 'long' ? 'LONG' : 'SHORT';
+  const pat     = direction === 'long' ? 'W' : 'M';
   const score   = (hasRSI ? 1 : 0) + (hasMACD ? 1 : 0) + (hasOBV ? 1 : 0);
-  const confStr = score === 3 ? '3/3 ⭐ HIGH CONFIDENCE' : `${score}/3`;
-  const rsiStr  = rsiVal != null ? String(rsiVal) : '?';
+  const confStr = `${score}/3`;
   const time    = new Date().toISOString().slice(11, 16) + ' UTC';
-
   if (stage === 1) {
     return [
-      `📊 <b>W BREAKOUT 1/2 — ${coin} | ${tf}</b>`,
-      `Neckline: $${neckline.toPrecision(6)}`,
-      `Breakout close: $${breakoutClose.toPrecision(6)}`,
-      `RSI: ${rsiStr} ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'} | OBV: ${hasOBV ? '✅' : '❌'}`,
-      `Confluence: ${confStr}`,
+      `📐 <b>LJ ${dir} 1/2 — ${coin} | ${tf} trendline + 1H ${pat} breakout</b>`,
+      `Neckline: $${neckline.toPrecision(6)} | Entry: $${entry.toPrecision(6)}`,
+      `RSI div: ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'} | OBV: ${hasOBV ? '✅' : '❌'} | Confluence: ${confStr}`,
       `Time: ${time}`,
     ].join('\n');
   }
   return [
-    `📊 <b>W BREAKOUT 2/2 — ${coin} | ${tf}</b>`,
-    `Neckline: $${neckline.toPrecision(6)} (retest confirmed)`,
-    `RSI: ${rsiStr} ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'} | OBV: ${hasOBV ? '✅' : '❌'}`,
-    `Confluence: ${confStr}`,
+    `📐 <b>LJ ${dir} 2/2 — ${coin} | ${tf} neckline retest confirmed</b>`,
+    `Neckline: $${neckline.toPrecision(6)}`,
+    `RSI div: ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'} | OBV: ${hasOBV ? '✅' : '❌'} | Confluence: ${confStr}`,
     `Time: ${time}`,
   ].join('\n');
 }
 
-function wboNecklaceKey(neckline) {
-  return neckline.toPrecision(5);
-}
-
-function wasAlertedWBORecently(symbol, tf, dedupKey) {
-  const ts = alertedWBO.get(`${symbol}:${tf}:${dedupKey}`);
-  return ts != null && Date.now() - ts < ALERT_RESET_WBO_MS;
-}
-
-function markAlertedWBO(symbol, tf, dedupKey) {
-  alertedWBO.set(`${symbol}:${tf}:${dedupKey}`, Date.now());
-}
-
-async function detectWBreakout(symbol, timeframes) {
+async function detectLJSetup(symbol, timeframes) {
   try {
     const buf = klineBuffers.get(symbol);
     if (!buf) return;
-
-    const tfBars = { '4H': buf.h4, 'D1': buf.d1, 'W1': buf.w1 };
+    const { h1, h4, d1, w1 } = buf;
+    if (!h1 || h1.length < 20) return;
+    const tfBars = { '4H': h4, 'D1': d1, 'W1': w1 };
+    const lastH1 = h1.at(-1);
 
     for (const tf of timeframes) {
-      const bars = tfBars[tf];
-      if (!bars || bars.length < 30) continue;
+      const htfBars = tfBars[tf];
+      if (!htfBars || htfBars.length < 10) continue;
 
-      const lastBar = bars.at(-1);
+      for (const direction of ['long', 'short']) {
+        const stageKey = `${symbol}:${tf}:${direction}`;
 
-      // ── Stage 2: retest bounce ─────────────────────────────────────────────
-      const s1Key  = `${symbol}:${tf}`;
-      const stage1 = wboStage1.get(s1Key);
+        // LONG: ascending support TL (higher lows from W bottoms)
+        // SHORT: descending resistance TL (lower highs from M tops)
+        const tl = direction === 'long'
+          ? detectUptrendTL(htfBars)    // ascending support = higher lows
+          : detectDowntrendTL(htfBars); // descending resistance = lower highs
+        if (!tl) continue;
 
-      if (stage1) {
-        const { neckline, nk } = stage1;
-        const retested = lastBar.low >= neckline * 0.99 && lastBar.low <= neckline * 1.01;
-        const bounced  = lastBar.close > neckline;
+        // Price must still be near the trendline (testing it or just broken through neckline)
+        // LONG: price at or within 10% above the ascending support TL
+        // SHORT: price at or within 10% below the descending resistance TL
+        const tlNow   = trendlineAt(tl, lastH1.time);
+        const priceOk = direction === 'long'
+          ? lastH1.close <= tlNow * 1.10
+          : lastH1.close >= tlNow * 0.90;
+        if (!priceOk) continue;
 
-        if (retested && bounced && !wasAlertedWBORecently(symbol, tf, nk + ':2')) {
-          const { hasRSI, hasMACD, hasOBV, rsiVal } = getWBOConfluence(bars);
-          console.log(`[wbo] ★★ ${symbol} W BREAKOUT 2/2 | ${tf} | neckline=${neckline.toPrecision(6)}`);
-          await sendTelegram(buildWBOAlert(symbol, tf, 2, neckline, lastBar.close, rsiVal, hasRSI, hasMACD, hasOBV));
-          markAlertedWBO(symbol, tf, nk + ':2');
-          wboStage1.delete(s1Key);
-          continue;
+        // ── Stage 2: neckline retest ───────────────────────────────────────
+        const s1Data = ljStage1.get(stageKey);
+        if (s1Data) {
+          const { neckline, nk } = s1Data;
+          const retested  = direction === 'long'
+            ? lastH1.low  <= neckline * 1.005 && lastH1.low  >= neckline * 0.995
+            : lastH1.high >= neckline * 0.995 && lastH1.high <= neckline * 1.005;
+          const confirmed = direction === 'long'
+            ? lastH1.close > neckline
+            : lastH1.close < neckline;
+          if (retested && confirmed && !wasAlertedLJRecently(symbol, tf, direction, nk + ':2')) {
+            const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
+            console.log(`[lj] ★★ ${symbol} LJ ${direction.toUpperCase()} 2/2 | ${tf} | neckline=${neckline.toPrecision(6)}`);
+            await sendTelegram(buildLJAlert(symbol, tf, direction, 2, neckline, lastH1.close, hasRSI, hasMACD, hasOBV));
+            markAlertedLJ(symbol, tf, direction, nk + ':2');
+            ljStage1.delete(stageKey);
+            continue;
+          }
         }
+
+        // ── Stage 1: neckline breakout ─────────────────────────────────────
+        const pattern = detectLJPattern(h1, direction, tl);
+        if (!pattern) continue;
+        const { neckline } = pattern;
+        const nk = neckline.toPrecision(5);
+        if (wasAlertedLJRecently(symbol, tf, direction, nk + ':1')) continue;
+        const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
+        console.log(
+          `[lj] ★ ${symbol} LJ ${direction.toUpperCase()} 1/2 | ${tf} | neckline=${neckline.toPrecision(6)} | ` +
+          `entry=${lastH1.close.toPrecision(6)} | RSI=${hasRSI} MACD=${hasMACD} OBV=${hasOBV}`
+        );
+        await sendTelegram(buildLJAlert(symbol, tf, direction, 1, neckline, lastH1.close, hasRSI, hasMACD, hasOBV));
+        markAlertedLJ(symbol, tf, direction, nk + ':1');
+        ljStage1.set(stageKey, { neckline, nk });
       }
-
-      // ── Stage 1: initial breakout ──────────────────────────────────────────
-      const pattern = detectWBreakoutPattern(bars);
-      if (!pattern) continue;
-
-      const { neckline } = pattern;
-      const nk = wboNecklaceKey(neckline);
-
-      if (wasAlertedWBORecently(symbol, tf, nk + ':1')) continue;
-
-      const { hasRSI, hasMACD, hasOBV, rsiVal } = getWBOConfluence(bars);
-
-      console.log(
-        `[wbo] ★ ${symbol} W BREAKOUT 1/2 | ${tf} | neckline=${neckline.toPrecision(6)} | ` +
-        `close=${lastBar.close.toPrecision(6)} | RSI=${rsiVal} MACD=${hasMACD} OBV=${hasOBV}`
-      );
-      await sendTelegram(buildWBOAlert(symbol, tf, 1, neckline, lastBar.close, rsiVal, hasRSI, hasMACD, hasOBV));
-      markAlertedWBO(symbol, tf, nk + ':1');
-      wboStage1.set(s1Key, { neckline, nk });
     }
   } catch (err) {
-    console.error(`[wbo] detectWBreakout ${symbol}: ${err.message}`);
+    console.error(`[lj] detectLJSetup ${symbol}: ${err.message}`);
   }
 }
 
@@ -1120,20 +798,18 @@ function wsSend(obj) {
 
 function subscribeSymbols(symbols) {
   for (const symbol of symbols) {
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'   } });
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60'  } });
-    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Hour4'  } });
-    // Day1 intentionally omitted — MEXC WS does not reliably support Day1 kline
-    // subscriptions; d1 buffer is refreshed via hourly REST in refreshLevels.
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min5'  } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Min60' } });
+    wsSend({ method: 'sub.kline', param: { symbol, interval: 'Hour4' } });
   }
   console.log(`[scanner] Subscribed klines for ${symbols.length} symbols (5m + 1H + 4H)`);
 }
 
 function unsubscribeSymbols(symbols) {
   for (const symbol of symbols) {
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'   } });
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60'  } });
-    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Hour4'  } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min5'  } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Min60' } });
+    wsSend({ method: 'unsub.kline', param: { symbol, interval: 'Hour4' } });
   }
 }
 
@@ -1141,20 +817,15 @@ function unsubscribeSymbols(symbols) {
 function handleMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
-
   const { channel, symbol, data } = msg;
   if (channel === 'pong') return;
-
   if (channel === 'push.kline') {
     if (!symbol || !data) return;
     const interval = data.interval;
     if (interval !== 'Min5' && interval !== 'Min60' && interval !== 'Hour4') return;
-
     const t    = data.t;
     const key  = `${symbol}:${interval}`;
     const lastT = lastWsTs.get(key);
-
-    // New timestamp → previous candle is now closed
     if (lastT !== undefined && t !== lastT) {
       const prev = pendingBar.get(key);
       if (prev) {
@@ -1177,15 +848,14 @@ function handleMessage(raw) {
               console.error(`[scanner] detectSFP ${symbol}: ${err.message}`)
             );
           }
-          if (interval === 'Hour4') {
-            detectWBreakout(symbol, ['4H']).catch(err =>
-              console.error(`[wbo] detectWBreakout ${symbol}: ${err.message}`)
+          if (interval === 'Min60') {
+            detectLJSetup(symbol, ['4H', 'D1', 'W1']).catch(err =>
+              console.error(`[lj] detectLJSetup ${symbol}: ${err.message}`)
             );
           }
         }
       }
     }
-
     pendingBar.set(key, data);
     lastWsTs.set(key, t);
   }
@@ -1196,7 +866,6 @@ function connect() {
   if (shuttingDown) return;
   console.log(`[scanner] Connecting WebSocket → ${WS_URL}`);
   ws = new WebSocket(WS_URL);
-
   ws.on('open', () => {
     console.log('[scanner] WebSocket connected');
     reconnectDelay = RECONNECT_BASE_MS;
@@ -1204,13 +873,11 @@ function connect() {
     pingTimer = setInterval(() => wsSend({ method: 'ping' }), PING_INTERVAL_MS);
     subscribeSymbols(topSymbols);
   });
-
   ws.on('message', (raw) => {
     try { handleMessage(raw.toString()); } catch (err) {
       console.error('[scanner] handleMessage error:', err.message);
     }
   });
-
   ws.on('close', (code) => {
     clearInterval(pingTimer);
     disconnectedAt = Date.now();
@@ -1219,10 +886,7 @@ function connect() {
       scheduleReconnect();
     }
   });
-
-  ws.on('error', (err) => {
-    console.error(`[scanner] WebSocket error: ${err.message}`);
-  });
+  ws.on('error', (err) => { console.error(`[scanner] WebSocket error: ${err.message}`); });
 }
 
 function scheduleReconnect() {
@@ -1246,14 +910,10 @@ async function refreshTopSymbols() {
     const newTop  = await fetchTopSymbols();
     const added   = newTop.filter(s => !topSymbols.includes(s));
     const removed = topSymbols.filter(s => !newTop.includes(s));
-
     if (added.length || removed.length) {
       console.log(`[scanner] Top refresh: +${added.length} added, -${removed.length} removed`);
       if (removed.length) unsubscribeSymbols(removed);
-      if (added.length) {
-        await bootstrapKlines(added);
-        subscribeSymbols(added);
-      }
+      if (added.length) { await bootstrapKlines(added); subscribeSymbols(added); }
       topSymbols = newTop;
     } else {
       console.log('[scanner] Top refresh: no changes');
@@ -1265,14 +925,13 @@ async function refreshTopSymbols() {
 
 // ── Export ────────────────────────────────────────────────────────────────────
 export async function startScanner() {
-  console.log('[scanner] ── CTA SFP Scanner starting ──');
-  console.log('[scanner] Setup: Location (key levels) → Structure (W/M) → Momentum (OBV + RSI + MACD)');
-  console.log('[scanner] Rank formula: 1 + (loc<<3 | obv<<2 | rsi<<1 | macd)  →  1/16 to 16/16');
+  console.log('[scanner] ── CTA SFP + LJ Setup Scanner starting ──');
+  console.log('[scanner] SFP: Location → Structure (W/M on key level) → Momentum | 5m candle close');
+  console.log('[scanner] LJ:  HTF ascending/descending TL (from W bottom / M top, 3+ touches) + 1H W/M at TL + neckline break | 1H close');
 
   process.on('unhandledRejection', (reason) => console.error('[scanner] Unhandled rejection:', reason));
   process.on('uncaughtException',  (err)    => console.error('[scanner] Uncaught exception:',  err.message));
 
-  // Step 1: Bootstrap via REST
   try {
     topSymbols = await fetchTopSymbols();
     await bootstrapKlines(topSymbols);
@@ -1281,16 +940,9 @@ export async function startScanner() {
     topSymbols = topSymbols.length ? topSymbols : [];
   }
 
-  // Step 2: Open WebSocket
   connect();
-
-  // Step 3: Hourly volume refresh
   setInterval(refreshTopSymbols, VOLUME_REFRESH_MS);
+  setTimeout(() => { setInterval(refreshLevels, LEVEL_REFRESH_MS); }, 30 * 60 * 1000);
 
-  // Step 4: Hourly level refresh — staggered 30min after volume refresh
-  setTimeout(() => {
-    setInterval(refreshLevels, LEVEL_REFRESH_MS);
-  }, 30 * 60 * 1000);
-
-  console.log('[scanner] Scanner armed — SFP/SFU (5m WS) + W Breakout (4H WS, D1/W1 REST hourly)');
+  console.log('[scanner] Scanner armed — SFP (5m WS) + LJ Setup (1H WS)');
 }
