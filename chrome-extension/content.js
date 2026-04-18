@@ -647,8 +647,6 @@
     pushButton.disabled    = true;
     pushButton.textContent = 'SENDING...';
 
-    console.log('[MEXC Scalp] Sending payload:', JSON.stringify(payload));
-
     try {
       const res  = await fetch(WEBHOOK_URL, {
         method: 'POST',

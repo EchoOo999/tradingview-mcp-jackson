@@ -2,8 +2,9 @@
  * WebSocket Scanner — MEXC Perpetual Futures
  *
  * CTA SFP (5m): Location → Structure (W/M on key level) → Momentum
- * LJ Setup (1H): HTF ascending support TL (LONG) or descending resistance TL (SHORT)
- *   originating from W bottoms / M tops; W/M lows/highs touch the TL → neckline break alert
+ * LJ Setup (1H): HTF TL (3+ rejections) → clean break → W/M on opposite side → neckline alert
+ *   LONG: descending resistance TL broken upward → W above broken TL → neckline break = 1/2
+ *   SHORT: ascending support TL broken downward → M below broken TL → neckline break = 1/2
  *
  * Rank formula (SFP): 1 + (loc<<3 | obv<<2 | rsi<<1 | macd) → 1/16–16/16
  */
@@ -560,10 +561,7 @@ async function detectSFP(symbol) {
       const hasRSI      = checkRSIDivergence(m5, direction);
       const hasMACD     = checkMACDDivergence(m5, direction);
       const rank        = calcRank(hasLocation, hasOBV, hasRSI, hasMACD);
-      if (rank < 2) {
-        console.log(`[scanner] skip ${symbol} ${direction.toUpperCase()} — rank 1/16, no confluence`);
-        continue;
-      }
+      if (rank < 2) continue;
       const { key: levelKey, price: levelPrice } = sfpMatch;
       console.log(
         `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
@@ -577,106 +575,218 @@ async function detectSFP(symbol) {
   }
 }
 
-// ── LJ Setup — Trendline Breakout + W/M Pattern ───────────────────────────────
+// ── LJ Setup — HTF Trendline Break + W/M on Opposite Side ─────────────────────
 //
-// The trendline originates FROM the W bottom / M top structure, not random pivots.
+// LONG: Descending resistance TL (3+ lower highs, each rejecting from below — close below TL)
+//   4th+ interaction: candle CLOSES ABOVE the TL (break — no wicks, close only)
+//   After break: W forms on 1H with BOTH lows ABOVE the broken TL
+//   W neckline breakout (1H close above) → Alert "LJ Long 1/2"
+//   Neckline retest + bounce back above → Alert "LJ Long 2/2"
 //
-// LONG: HTF ascending support trendline (3+ higher lows from W bottoms on 4H/D1/W1)
-//   Price retraces to test the ascending TL.
-//   A W pattern forms on 1H with BOTH lows touching the ascending TL (±2%).
-//   1H close above W neckline → Alert "LJ Long 1/2"  (trendline hold + neckline break)
-//   1H neckline retest + close back above → Alert "LJ Long 2/2" (retest confirmed)
-//
-// SHORT: HTF descending resistance trendline (3+ lower highs from M tops on 4H/D1/W1)
-//   Price rallies to test the descending TL.
-//   An M pattern forms on 1H with BOTH highs touching the descending TL (±2%).
-//   1H close below M neckline → Alert "LJ Short 1/2"  (trendline reject + neckline break)
-//   1H neckline retest + close back below → Alert "LJ Short 2/2" (retest confirmed)
+// SHORT: Ascending support TL (3+ higher lows, each rejecting from above — close above TL)
+//   4th+ interaction: candle CLOSES BELOW the TL (break)
+//   After break: M forms on 1H with BOTH highs BELOW the broken TL
+//   M neckline breakdown (1H close below) → Alert "LJ Short 1/2"
+//   Neckline retest + rejection back below → Alert "LJ Short 2/2"
 
-function detectDowntrendTL(bars, wing = 2) {
-  const highs = [];
-  for (let i = wing; i < bars.length - wing; i++) {
-    let ok = true;
-    for (let j = i - wing; j <= i + wing; j++) {
-      if (j !== i && bars[j].high >= bars[i].high) { ok = false; break; }
-    }
-    if (ok) highs.push({ time: bars[i].time, price: bars[i].high });
-  }
-  if (highs.length < 3) return null;
-  // Find most recent group of 3+ consecutive lower highs
-  for (let i = highs.length - 1; i >= 2; i--) {
-    if (highs[i].price < highs[i - 1].price && highs[i - 1].price < highs[i - 2].price) {
-      const p1 = highs[i - 2], p2 = highs[i];
-      const slope     = (p2.price - p1.price) / (p2.time - p1.time);
-      const intercept = p1.price - slope * p1.time;
-      return { slope, intercept };
-    }
-  }
-  return null;
-}
-
-function detectUptrendTL(bars, wing = 2) {
-  const lows = [];
-  for (let i = wing; i < bars.length - wing; i++) {
-    let ok = true;
-    for (let j = i - wing; j <= i + wing; j++) {
-      if (j !== i && bars[j].low <= bars[i].low) { ok = false; break; }
-    }
-    if (ok) lows.push({ time: bars[i].time, price: bars[i].low });
-  }
-  if (lows.length < 3) return null;
-  for (let i = lows.length - 1; i >= 2; i--) {
-    if (lows[i].price > lows[i - 1].price && lows[i - 1].price > lows[i - 2].price) {
-      const p1 = lows[i - 2], p2 = lows[i];
-      const slope     = (p2.price - p1.price) / (p2.time - p1.time);
-      const intercept = p1.price - slope * p1.time;
-      return { slope, intercept };
-    }
-  }
-  return null;
-}
+const LJ_MIN_TOUCHES    = 3;
+const LJ_MIN_GAP_BARS   = 3;                        // min bars between rejection touches
+const LJ_TOUCH_TOL      = 0.015;                    // ±1.5% wick must reach TL to count
+const LJ_BREAK_STALE_MS = 7 * 24 * 60 * 60 * 1000; // discard breaks older than 7 days
 
 function trendlineAt(tl, time) {
   return tl.slope * time + tl.intercept;
 }
 
-// Detect W/M on 1H bars where both extremes TOUCH the trendline (±2% zone).
-// Returns { neckline } or null.
-// LONG W:  both lows touch ascending support TL; last 1H close above neckline.
-// SHORT M: both highs touch descending resistance TL; last 1H close below neckline.
-function detectLJPattern(bars1h, direction, tl) {
-  if (bars1h.length < 10) return null;
-  const last    = bars1h.at(-1);
-  const n       = bars1h.length;
-  const MIN_GAP = 2;
-  const TOUCH   = 0.02; // ±2% accepted as "touching" the trendline
+// Descending resistance TL: lower pivot highs, each closing BELOW the TL (rejection).
+// Returns { tl, touchCount, breakBar, _dbg } or null.
+// breakBar = first candle after 3rd+ rejection where close > TL.
+function detectDescendingTLBreak(bars, wing = 2) {
+  const pivots = [];
+  for (let i = wing; i < bars.length - wing; i++) {
+    let ok = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j !== i && bars[j].high >= bars[i].high) { ok = false; break; }
+    }
+    if (ok) pivots.push({ idx: i, time: bars[i].time, price: bars[i].high });
+  }
+  if (pivots.length < LJ_MIN_TOUCHES) return null;
+
+  // Try each possible rightmost pivot as end of a descending chain
+  for (let end = pivots.length - 1; end >= LJ_MIN_TOUCHES - 1; end--) {
+    // Build chain going left: each older pivot must be higher (= descending TL going right)
+    const group = [end];
+    for (let k = end - 1; k >= 0 && group.length < 12; k--) {
+      const tail = group[group.length - 1];
+      if (pivots[tail].idx - pivots[k].idx < LJ_MIN_GAP_BARS) continue;
+      if (pivots[k].price > pivots[tail].price) group.push(k);
+    }
+    if (group.length < LJ_MIN_TOUCHES) continue;
+    group.reverse(); // oldest → newest
+
+    // Verify strict descent after reversal
+    let ok = true;
+    for (let k = 1; k < group.length; k++) {
+      if (pivots[group[k]].price >= pivots[group[k - 1]].price) { ok = false; break; }
+    }
+    if (!ok) continue;
+
+    // TL defined by oldest and newest pivot in group
+    const p1 = pivots[group[0]], p2 = pivots[group[group.length - 1]];
+    const slope     = (p2.price - p1.price) / (p2.time - p1.time);
+    const intercept = p1.price - slope * p1.time;
+    const tl        = { slope, intercept };
+
+    // Validate each touch: wick reached TL (±1.5%) AND close was BELOW (rejection)
+    let validTouches = 0;
+    let lastTouchIdx = -1;
+    const touchLog   = [];
+    for (const gi of group) {
+      const piv  = pivots[gi];
+      const tlPx = trendlineAt(tl, piv.time);
+      if (Math.abs(piv.price - tlPx) / tlPx <= LJ_TOUCH_TOL && bars[piv.idx].close < tlPx) {
+        validTouches++;
+        lastTouchIdx = piv.idx;
+        touchLog.push({ time: new Date(piv.time * 1000).toISOString(), price: piv.price.toPrecision(6) });
+      }
+    }
+    if (validTouches < LJ_MIN_TOUCHES || lastTouchIdx < 0) continue;
+
+    // Find break bar: first candle after last touch with close ABOVE TL
+    for (let j = lastTouchIdx + 1; j < bars.length; j++) {
+      const tlPx = trendlineAt(tl, bars[j].time);
+      if (bars[j].close > tlPx) {
+        return {
+          tl, touchCount: validTouches, breakBar: bars[j],
+          _dbg: { touches: touchLog, breakTime: new Date(bars[j].time * 1000).toISOString() },
+        };
+      }
+    }
+  }
+  return null;
+}
+
+// Ascending support TL: higher pivot lows, each closing ABOVE the TL (rejection).
+// Returns { tl, touchCount, breakBar, _dbg } or null.
+// breakBar = first candle after 3rd+ rejection where close < TL.
+function detectAscendingTLBreak(bars, wing = 2) {
+  const pivots = [];
+  for (let i = wing; i < bars.length - wing; i++) {
+    let ok = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j !== i && bars[j].low <= bars[i].low) { ok = false; break; }
+    }
+    if (ok) pivots.push({ idx: i, time: bars[i].time, price: bars[i].low });
+  }
+  if (pivots.length < LJ_MIN_TOUCHES) return null;
+
+  for (let end = pivots.length - 1; end >= LJ_MIN_TOUCHES - 1; end--) {
+    const group = [end];
+    for (let k = end - 1; k >= 0 && group.length < 12; k--) {
+      const tail = group[group.length - 1];
+      if (pivots[tail].idx - pivots[k].idx < LJ_MIN_GAP_BARS) continue;
+      if (pivots[k].price < pivots[tail].price) group.push(k);
+    }
+    if (group.length < LJ_MIN_TOUCHES) continue;
+    group.reverse();
+
+    let ok = true;
+    for (let k = 1; k < group.length; k++) {
+      if (pivots[group[k]].price <= pivots[group[k - 1]].price) { ok = false; break; }
+    }
+    if (!ok) continue;
+
+    const p1 = pivots[group[0]], p2 = pivots[group[group.length - 1]];
+    const slope     = (p2.price - p1.price) / (p2.time - p1.time);
+    const intercept = p1.price - slope * p1.time;
+    const tl        = { slope, intercept };
+
+    let validTouches = 0;
+    let lastTouchIdx = -1;
+    const touchLog   = [];
+    for (const gi of group) {
+      const piv  = pivots[gi];
+      const tlPx = trendlineAt(tl, piv.time);
+      if (Math.abs(piv.price - tlPx) / tlPx <= LJ_TOUCH_TOL && bars[piv.idx].close > tlPx) {
+        validTouches++;
+        lastTouchIdx = piv.idx;
+        touchLog.push({ time: new Date(piv.time * 1000).toISOString(), price: piv.price.toPrecision(6) });
+      }
+    }
+    if (validTouches < LJ_MIN_TOUCHES || lastTouchIdx < 0) continue;
+
+    for (let j = lastTouchIdx + 1; j < bars.length; j++) {
+      const tlPx = trendlineAt(tl, bars[j].time);
+      if (bars[j].close < tlPx) {
+        return {
+          tl, touchCount: validTouches, breakBar: bars[j],
+          _dbg: { touches: touchLog, breakTime: new Date(bars[j].time * 1000).toISOString() },
+        };
+      }
+    }
+  }
+  return null;
+}
+
+// Detect W (LONG) or M (SHORT) on 1H bars that formed AFTER the break,
+// on the OPPOSITE side of the broken TL.
+// LONG W: two local lows BOTH ABOVE the broken descending TL → neckline = highest high between them.
+// SHORT M: two local highs BOTH BELOW the broken ascending TL → neckline = lowest low between them.
+// Returns { neckline, _dbg } or null.
+function detectLJPattern(bars1h, direction, tl, breakTime) {
+  // Only consider 1H bars that opened after the break candle
+  const startIdx = bars1h.findIndex(b => b.time >= breakTime);
+  if (startIdx < 0 || bars1h.length - startIdx < 5) return null;
+
+  const postBreak = bars1h.slice(startIdx);
+  const last      = postBreak.at(-1);
+  const n         = postBreak.length;
+  const MIN_GAP   = 2;
 
   if (direction === 'long') {
-    // W lows must touch the ascending support TL
-    for (let ri = n - 2; ri >= Math.max(n - 20, 1); ri--) {
-      const tlRi = trendlineAt(tl, bars1h[ri].time);
-      if (Math.abs(bars1h[ri].low - tlRi) / tlRi > TOUCH) continue;
-      for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 30); li--) {
-        const tlLi = trendlineAt(tl, bars1h[li].time);
-        if (Math.abs(bars1h[li].low - tlLi) / tlLi > TOUCH) continue;
-        const midBars = bars1h.slice(li + 1, ri);
+    for (let ri = n - 2; ri >= 1; ri--) {
+      const tlRi = trendlineAt(tl, postBreak[ri].time);
+      if (postBreak[ri].low <= tlRi) continue; // right low must be ABOVE broken TL
+      for (let li = ri - MIN_GAP; li >= 0; li--) {
+        const tlLi = trendlineAt(tl, postBreak[li].time);
+        if (postBreak[li].low <= tlLi) continue; // left low must also be ABOVE broken TL
+        const midBars = postBreak.slice(li + 1, ri);
         if (!midBars.length) continue;
         const neckline = Math.max(...midBars.map(b => b.high));
-        if (last.close > neckline) return { neckline };
+        if (last.close > neckline) {
+          return {
+            neckline,
+            _dbg: {
+              wLeft:    { time: new Date(postBreak[li].time * 1000).toISOString(), low: postBreak[li].low.toPrecision(6) },
+              wRight:   { time: new Date(postBreak[ri].time * 1000).toISOString(), low: postBreak[ri].low.toPrecision(6) },
+              neckline: neckline.toPrecision(6),
+              alertBar: new Date(last.time * 1000).toISOString(),
+            },
+          };
+        }
       }
     }
   } else {
-    // M highs must touch the descending resistance TL
-    for (let ri = n - 2; ri >= Math.max(n - 20, 1); ri--) {
-      const tlRi = trendlineAt(tl, bars1h[ri].time);
-      if (Math.abs(bars1h[ri].high - tlRi) / tlRi > TOUCH) continue;
-      for (let li = ri - MIN_GAP; li >= Math.max(0, ri - 30); li--) {
-        const tlLi = trendlineAt(tl, bars1h[li].time);
-        if (Math.abs(bars1h[li].high - tlLi) / tlLi > TOUCH) continue;
-        const midBars = bars1h.slice(li + 1, ri);
+    for (let ri = n - 2; ri >= 1; ri--) {
+      const tlRi = trendlineAt(tl, postBreak[ri].time);
+      if (postBreak[ri].high >= tlRi) continue; // right high must be BELOW broken TL
+      for (let li = ri - MIN_GAP; li >= 0; li--) {
+        const tlLi = trendlineAt(tl, postBreak[li].time);
+        if (postBreak[li].high >= tlLi) continue; // left high must also be BELOW broken TL
+        const midBars = postBreak.slice(li + 1, ri);
         if (!midBars.length) continue;
         const neckline = Math.min(...midBars.map(b => b.low));
-        if (last.close < neckline) return { neckline };
+        if (last.close < neckline) {
+          return {
+            neckline,
+            _dbg: {
+              mLeft:    { time: new Date(postBreak[li].time * 1000).toISOString(), high: postBreak[li].high.toPrecision(6) },
+              mRight:   { time: new Date(postBreak[ri].time * 1000).toISOString(), high: postBreak[ri].high.toPrecision(6) },
+              neckline: neckline.toPrecision(6),
+              alertBar: new Date(last.time * 1000).toISOString(),
+            },
+          };
+        }
       }
     }
   }
@@ -704,7 +814,7 @@ function buildLJAlert(symbol, tf, direction, stage, neckline, entry, hasRSI, has
   const time    = new Date().toISOString().slice(11, 16) + ' UTC';
   if (stage === 1) {
     return [
-      `📐 <b>LJ ${dir} 1/2 — ${coin} | ${tf} trendline + 1H ${pat} breakout</b>`,
+      `📐 <b>LJ ${dir} 1/2 — ${coin} | ${tf} TL break + 1H ${pat} neckline breakout</b>`,
       `Neckline: $${neckline.toPrecision(6)} | Entry: $${entry.toPrecision(6)}`,
       `RSI div: ${hasRSI ? '✅' : '❌'} | MACD: ${hasMACD ? '✅' : '❌'} | OBV: ${hasOBV ? '✅' : '❌'} | Confluence: ${confStr}`,
       `Time: ${time}`,
@@ -734,23 +844,26 @@ async function detectLJSetup(symbol, timeframes) {
       for (const direction of ['long', 'short']) {
         const stageKey = `${symbol}:${tf}:${direction}`;
 
-        // LONG: ascending support TL (higher lows from W bottoms)
-        // SHORT: descending resistance TL (lower highs from M tops)
-        const tl = direction === 'long'
-          ? detectUptrendTL(htfBars)    // ascending support = higher lows
-          : detectDowntrendTL(htfBars); // descending resistance = lower highs
-        if (!tl) continue;
+        // LONG: descending resistance TL broken upward → W forms above
+        // SHORT: ascending support TL broken downward → M forms below
+        const tlBreak = direction === 'long'
+          ? detectDescendingTLBreak(htfBars)
+          : detectAscendingTLBreak(htfBars);
+        if (!tlBreak) continue;
 
-        // Price must still be near the trendline (testing it or just broken through neckline)
-        // LONG: price at or within 10% above the ascending support TL
-        // SHORT: price at or within 10% below the descending resistance TL
-        const tlNow   = trendlineAt(tl, lastH1.time);
-        const priceOk = direction === 'long'
-          ? lastH1.close <= tlNow * 1.10
-          : lastH1.close >= tlNow * 0.90;
-        if (!priceOk) continue;
+        const { tl, touchCount, breakBar, _dbg } = tlBreak;
 
-        // ── Stage 2: neckline retest ───────────────────────────────────────
+        // Discard breaks older than 7 days — setup has expired
+        if ((lastH1.time - breakBar.time) * 1000 > LJ_BREAK_STALE_MS) continue;
+
+        // Price must still be on the break side of the TL
+        const tlNow  = trendlineAt(tl, lastH1.time);
+        const sideOk = direction === 'long'
+          ? lastH1.close > tlNow
+          : lastH1.close < tlNow;
+        if (!sideOk) continue;
+
+        // ── Stage 2: neckline retest ─────────────────────────────────────────
         const s1Data = ljStage1.get(stageKey);
         if (s1Data) {
           const { neckline, nk } = s1Data;
@@ -770,17 +883,23 @@ async function detectLJSetup(symbol, timeframes) {
           }
         }
 
-        // ── Stage 1: neckline breakout ─────────────────────────────────────
-        const pattern = detectLJPattern(h1, direction, tl);
+        // ── Stage 1: W/M neckline breakout ──────────────────────────────────
+        const pattern = detectLJPattern(h1, direction, tl, breakBar.time);
         if (!pattern) continue;
-        const { neckline } = pattern;
+        const { neckline, _dbg: patDbg } = pattern;
         const nk = neckline.toPrecision(5);
         if (wasAlertedLJRecently(symbol, tf, direction, nk + ':1')) continue;
-        const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
+
+        // Debug trace
         console.log(
-          `[lj] ★ ${symbol} LJ ${direction.toUpperCase()} 1/2 | ${tf} | neckline=${neckline.toPrecision(6)} | ` +
-          `entry=${lastH1.close.toPrecision(6)} | RSI=${hasRSI} MACD=${hasMACD} OBV=${hasOBV}`
+          `[lj] ★ ${symbol} LJ ${direction.toUpperCase()} 1/2 | ${tf}` +
+          `\n  touches(${touchCount}): ${_dbg.touches.map(t => `${t.time}@${t.price}`).join(' | ')}` +
+          `\n  break: ${_dbg.breakTime}` +
+          `\n  ${direction === 'long' ? 'W' : 'M'} neckline: ${nk} | ${JSON.stringify(patDbg)}` +
+          `\n  entry: ${lastH1.close.toPrecision(6)}`
         );
+
+        const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
         await sendTelegram(buildLJAlert(symbol, tf, direction, 1, neckline, lastH1.close, hasRSI, hasMACD, hasOBV));
         markAlertedLJ(symbol, tf, direction, nk + ':1');
         ljStage1.set(stageKey, { neckline, nk });
@@ -927,7 +1046,7 @@ async function refreshTopSymbols() {
 export async function startScanner() {
   console.log('[scanner] ── CTA SFP + LJ Setup Scanner starting ──');
   console.log('[scanner] SFP: Location → Structure (W/M on key level) → Momentum | 5m candle close');
-  console.log('[scanner] LJ:  HTF ascending/descending TL (from W bottom / M top, 3+ touches) + 1H W/M at TL + neckline break | 1H close');
+  console.log('[scanner] LJ:  HTF TL (3+ rejections) → clean break → 1H W/M on opposite side → neckline break alert | 1H close');
 
   process.on('unhandledRejection', (reason) => console.error('[scanner] Unhandled rejection:', reason));
   process.on('uncaughtException',  (err)    => console.error('[scanner] Uncaught exception:',  err.message));

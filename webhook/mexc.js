@@ -28,7 +28,6 @@ async function getContractDetail(symbol) {
         volScale: Number(d.volScale || 0),
       };
       contractDetailCache[symbol] = detail;
-      console.log(`[contract detail] ${symbol}:`, JSON.stringify(detail));
       return detail;
     }
     console.warn(`[contract detail] No data for ${symbol}:`, JSON.stringify(data).slice(0, 200));
@@ -81,8 +80,6 @@ async function request(method, path, body, apiKey, apiSecret) {
     'Content-Type': 'application/json',
   };
 
-  console.log(`[MEXC req] ${method} ${path} | ts=${timestamp} | sig=${signature.slice(0, 16)}... | body=${bodyStr.slice(0, 120)}`);
-
   const res = await fetch(url, {
     method,
     headers,
@@ -90,8 +87,6 @@ async function request(method, path, body, apiKey, apiSecret) {
   });
 
   const text = await res.text();
-  console.log(`[MEXC res ${res.status}] ${text.slice(0, 500)}`);
-
   let data;
   try {
     data = JSON.parse(text);
@@ -124,7 +119,6 @@ export async function getBalance(apiKey, apiSecret) {
         headers: { 'X-MEXC-APIKEY': apiKey },
       });
       const rawSpot = await res.text();
-      console.log(`[Spot res ${res.status}] ${rawSpot.slice(0, 500)}`);
       let json;
       try { json = JSON.parse(rawSpot); }
       catch (_) { throw new Error(`Spot non-JSON (${res.status}): ${rawSpot.slice(0, 200)}`); }
