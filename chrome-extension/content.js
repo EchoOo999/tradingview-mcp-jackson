@@ -250,6 +250,19 @@
 
   document.body.appendChild(panel);
 
+  // Restore saved position (overrides CSS default when available)
+  try {
+    chrome.storage.local.get('mexcScalpPosition', (result) => {
+      if (result.mexcScalpPosition) {
+        const p = result.mexcScalpPosition;
+        panel.style.top    = p.top  + 'px';
+        panel.style.left   = p.left + 'px';
+        panel.style.bottom = 'auto';
+        panel.style.right  = 'auto';
+      }
+    });
+  } catch (_) {}
+
   // ─── Segmented Toggle Logic ────────────────────────────────────────────────
 
   function wireToggle(groupId) {
@@ -503,20 +516,39 @@
 
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    panel.style.left  = Math.max(0, Math.min(window.innerWidth  - panel.offsetWidth,  e.clientX - ox)) + 'px';
-    panel.style.top   = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - oy)) + 'px';
-    panel.style.right = 'auto';
+    panel.style.left   = Math.max(0, Math.min(window.innerWidth  - panel.offsetWidth,  e.clientX - ox)) + 'px';
+    panel.style.top    = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - oy)) + 'px';
+    panel.style.right  = 'auto';
+    panel.style.bottom = 'auto';
   });
 
-  document.addEventListener('mouseup', () => { dragging = false; });
+  document.addEventListener('mouseup', () => {
+    if (dragging) {
+      dragging = false;
+      const r = panel.getBoundingClientRect();
+      try { chrome.storage.local.set({ mexcScalpPosition: { top: r.top, left: r.left } }); } catch (_) {}
+    }
+  });
 
   // ─── Collapse / Expand / Close ─────────────────────────────────────────────
 
   const minimizeBtn = document.getElementById('msp-minimize');
+
+  // Restore minimize state (now that minimizeBtn is available)
+  try {
+    chrome.storage.local.get('mexcScalpMinimized', (result) => {
+      if (result.mexcScalpMinimized) {
+        panel.classList.add('collapsed');
+        minimizeBtn.textContent = '+';
+      }
+    });
+  } catch (_) {}
+
   minimizeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     panel.classList.toggle('collapsed');
     minimizeBtn.textContent = panel.classList.contains('collapsed') ? '+' : '−';
+    try { chrome.storage.local.set({ mexcScalpMinimized: panel.classList.contains('collapsed') }); } catch (_) {}
   });
 
   // ─── Floating Reopen Button ────────────────────────────────────────────────

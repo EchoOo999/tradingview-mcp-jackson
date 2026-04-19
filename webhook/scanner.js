@@ -28,6 +28,12 @@ const ALERT_RESET_LJ_MS      = 24 * 60 * 60 * 1000;
 const TOP_N           = 20;
 const MIN_VOLUME_USDT = 5_000_000;
 
+// ── Alert Master Toggle ────────────────────────────────────────────────────────
+// To resume Telegram sends: set ALERTS_ENABLED = true and redeploy.
+// While false, every detection still runs and logs "[MUTED] Would have sent: ..."
+// so you can verify signal quality without spamming Telegram.
+const ALERTS_ENABLED = false;
+
 const BOOTSTRAP_5M  = 100;
 const BOOTSTRAP_1H  = 500;
 const BOOTSTRAP_4H  = 100;
@@ -567,7 +573,12 @@ async function detectSFP(symbol) {
         `[scanner] ★ ${symbol} ${direction.toUpperCase()} ${rank}/16 | ` +
         `level=${levelKey} | loc=${locZone || 'none'} | OBV=${hasOBV} RSI=${hasRSI} MACD=${hasMACD}`
       );
-      await sendTelegram(buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD));
+      const alertText = buildAlert(symbol, direction, levelKey, levelPrice, rank, hasLocation, locZone, hasOBV, hasRSI, hasMACD);
+      if (ALERTS_ENABLED) {
+        await sendTelegram(alertText);
+      } else {
+        console.log(`[MUTED] Would have sent: ${alertText.replace(/<[^>]+>/g, '')}`);
+      }
       markAlerted(symbol, direction, levelKey);
     }
   } catch (err) {
@@ -876,7 +887,12 @@ async function detectLJSetup(symbol, timeframes) {
           if (retested && confirmed && !wasAlertedLJRecently(symbol, tf, direction, nk + ':2')) {
             const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
             console.log(`[lj] ★★ ${symbol} LJ ${direction.toUpperCase()} 2/2 | ${tf} | neckline=${neckline.toPrecision(6)}`);
-            await sendTelegram(buildLJAlert(symbol, tf, direction, 2, neckline, lastH1.close, hasRSI, hasMACD, hasOBV));
+            const ljText2 = buildLJAlert(symbol, tf, direction, 2, neckline, lastH1.close, hasRSI, hasMACD, hasOBV);
+            if (ALERTS_ENABLED) {
+              await sendTelegram(ljText2);
+            } else {
+              console.log(`[MUTED] Would have sent: ${ljText2.replace(/<[^>]+>/g, '')}`);
+            }
             markAlertedLJ(symbol, tf, direction, nk + ':2');
             ljStage1.delete(stageKey);
             continue;
@@ -900,7 +916,12 @@ async function detectLJSetup(symbol, timeframes) {
         );
 
         const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
-        await sendTelegram(buildLJAlert(symbol, tf, direction, 1, neckline, lastH1.close, hasRSI, hasMACD, hasOBV));
+        const ljText1 = buildLJAlert(symbol, tf, direction, 1, neckline, lastH1.close, hasRSI, hasMACD, hasOBV);
+        if (ALERTS_ENABLED) {
+          await sendTelegram(ljText1);
+        } else {
+          console.log(`[MUTED] Would have sent: ${ljText1.replace(/<[^>]+>/g, '')}`);
+        }
         markAlertedLJ(symbol, tf, direction, nk + ':1');
         ljStage1.set(stageKey, { neckline, nk });
       }

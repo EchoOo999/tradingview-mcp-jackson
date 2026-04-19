@@ -13,7 +13,7 @@
         "https://www.tradingview.com/*",
         "https://tradingview.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["content.js", "market-cockpit.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
     }

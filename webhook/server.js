@@ -126,6 +126,103 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// Macro data proxy — Yahoo Finance (bypasses CORS for browser extension clients)
+app.get('/market-data', async (req, res) => {
+  const YF_SYMBOLS = {
+    DXY:   'DX-Y.NYB',
+    OIL:   'CL=F',
+    GOLD:  'GC=F',
+    SPX:   '%5EGSPC',
+    NDX:   '%5EIXIC',
+    US10Y: '%5ETNX',
+    VIX:   '%5EVIX',
+  };
+  const results = {};
+  await Promise.all(Object.entries(YF_SYMBOLS).map(async ([name, yf]) => {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yf}?interval=1d&range=5d`;
+      const r = await fetch(url, {
+        signal: AbortSignal.timeout(8_000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; market-cockpit/1.0)' },
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const json  = await r.json();
+      const meta   = json.chart?.result?.[0]?.meta;
+      const quotes = json.chart?.result?.[0]?.indicators?.quote?.[0];
+      const closes = (quotes?.close ?? []).filter(v => v != null);
+      if (!meta || closes.length < 2) throw new Error('Insufficient data');
+      const curr   = meta.regularMarketPrice ?? closes.at(-1);
+      const prev   = closes.at(-2);
+      const change = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
+      results[name] = { value: curr, change, prev };
+    } catch (err) {
+      console.warn(`[market-data] ${name}: ${err.message}`);
+      results[name] = null;
+    }
+  }));
+  return res.json({ success: true, data: results, ts: Date.now() });
+});
+
+// Crypto data proxy — CoinGecko + Binance (bypasses CORS for browser extension clients)
+app.get('/crypto-data', async (req, res) => {
+  try {
+    const [globalRes, marketsRes, ethBtcRes] = await Promise.all([
+      fetch('https://api.coingecko.com/api/v3/global', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+      fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false&price_change_percentage=24h', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=ETHBTC', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+    ]);
+
+    const gd           = globalRes.data;
+    const totalMktCap  = gd.total_market_cap.usd;
+    const totalChange  = gd.market_cap_change_percentage_24h_usd;
+    const totalPrev    = totalMktCap / (1 + totalChange / 100);
+
+    const btcCoin  = marketsRes.find(c => c.id === 'bitcoin')  ?? {};
+    const ethCoin  = marketsRes.find(c => c.id === 'ethereum') ?? {};
+    const btcMktCap = btcCoin.market_cap ?? (totalMktCap * gd.market_cap_percentage.btc / 100);
+    const ethMktCap = ethCoin.market_cap ?? (totalMktCap * gd.market_cap_percentage.eth / 100);
+    const btcChange = btcCoin.price_change_percentage_24h ?? 0;
+    const ethChange = ethCoin.price_change_percentage_24h ?? 0;
+    const btcPrev   = btcMktCap / (1 + btcChange / 100);
+    const ethPrev   = ethMktCap / (1 + ethChange / 100);
+
+    const btcDomCurrent  = gd.market_cap_percentage.btc;
+    const btcDomPrev     = (btcPrev / totalPrev) * 100;
+    const usdtMktCap     = totalMktCap * gd.market_cap_percentage.usdt / 100;
+    const usdtDomCurrent = gd.market_cap_percentage.usdt;
+    const usdtDomPrev    = (usdtMktCap / totalPrev) * 100;
+
+    const total3Current  = totalMktCap - btcMktCap - ethMktCap;
+    const total3Prev     = totalPrev   - btcPrev   - ethPrev;
+    const total3Change   = total3Prev > 0 ? ((total3Current - total3Prev) / total3Prev) * 100 : 0;
+
+    const top10Sum       = marketsRes.reduce((s, c) => s + (c.market_cap ?? 0), 0);
+    const top10SumPrev   = marketsRes.reduce((s, c) => {
+      const chg = c.price_change_percentage_24h ?? 0;
+      return s + (c.market_cap ?? 0) / (1 + chg / 100);
+    }, 0);
+    const othersCurrent  = Math.max(0, totalMktCap - top10Sum);
+    const othersPrev     = Math.max(0, totalPrev   - top10SumPrev);
+    const othersChange   = othersPrev > 0 ? ((othersCurrent - othersPrev) / othersPrev) * 100 : 0;
+
+    return res.json({
+      success: true,
+      ts: Date.now(),
+      data: {
+        btcD:   { value: btcDomCurrent,  change: btcDomCurrent  - btcDomPrev },
+        usdtD:  { value: usdtDomCurrent, change: usdtDomCurrent - usdtDomPrev },
+        ethBtc: { value: parseFloat(ethBtcRes.lastPrice), change: parseFloat(ethBtcRes.priceChangePercent) },
+        total:  { value: totalMktCap,    change: totalChange },
+        total3: { value: total3Current,  change: total3Change },
+        others: { value: othersCurrent,  change: othersChange },
+      },
+    });
+  } catch (err) {
+    console.error(`[crypto-data] ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Webhook server listening on port ${PORT}`);
   console.log(`POST http://localhost:${PORT}/webhook`);
