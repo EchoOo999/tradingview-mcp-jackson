@@ -120,29 +120,51 @@
     return 'Risk-off — defensive positioning only';
   }
 
-  function masterRegime(cs, ms, cDetails, mDetails) {
+  // Classify raw scores into 3 tiers, then map the 3x3 matrix to crypto-trader-
+  // focused labels. Gaps filled by severity (crypto-weakness dominates macro).
+  function cryptoTier(s) { return s <= 1 ? 'OFF' : s >= 4 ? 'ON' : 'NEUTRAL'; }
+  function macroTier(s)  { return s <= 2 ? 'OFF' : s >= 4 ? 'ON' : 'NEUTRAL'; }
+
+  function masterRegime(cs, ms) {
     if (cs == null || ms == null) return null;
-    const vixBull = mDetails?.find(d => d.key === 'VIX')?.bullish;
-    const spxBull = mDetails?.find(d => d.key === 'SPX')?.bullish;
-    if (!vixBull && !spxBull && ms <= 1)   return 'FULL RISK-OFF';
-    if (cs >= 5 && ms >= 5)                return 'FULL RISK-ON (CRYPTO BULL)';
-    if (ms <= 2 && cs >= 4)                return 'CRYPTO LEADING (MACRO LAGGING)';
-    const pct = (cs + ms) / 13;
-    if (pct >= 0.75) return 'FULL RISK-ON';
-    if (pct >= 0.55) return 'RISK-ON';
-    if (pct >= 0.40) return 'NEUTRAL';
-    if (pct >= 0.25) return 'RISK-OFF';
-    return 'FULL RISK-OFF';
+    const c = cryptoTier(cs);
+    const m = macroTier(ms);
+    if (c === 'ON'      && m === 'ON')      return '🚀 FULL RISK-ON';
+    if (c === 'ON'      && m === 'OFF')     return '⚡ CRYPTO-ONLY RALLY';
+    if (c === 'ON'      && m === 'NEUTRAL') return '🟢 CRYPTO LEADING';
+    if (c === 'NEUTRAL' && m === 'ON')      return '🟡 MACRO TAILWIND';
+    if (c === 'NEUTRAL' && m === 'NEUTRAL') return '➡️ MIXED';
+    if (c === 'NEUTRAL' && m === 'OFF')     return '⚠️ MACRO HEADWIND';
+    if (c === 'OFF'     && m === 'ON')      return '⚠️ CRYPTO DECOUPLING';
+    return '💀 FULL RISK-OFF'; // c=OFF + (m=NEUTRAL | m=OFF)
   }
 
+  const MASTER_ACTIONS = {
+    '🚀 FULL RISK-ON':       'Max long positions, all systems go',
+    '⚡ CRYPTO-ONLY RALLY':   'Crypto strong despite macro headwinds — longs possible but size smaller, watch for correlation return',
+    '🟢 CRYPTO LEADING':     'Crypto strength, cautious longs OK',
+    '🟡 MACRO TAILWIND':     'Favorable backdrop, wait for crypto confirmation',
+    '➡️ MIXED':              'Wait for clarity, no strong bias',
+    '⚠️ MACRO HEADWIND':      'TradFi weakness bleeding in — avoid new longs, wait for macro stabilization',
+    '⚠️ CRYPTO DECOUPLING':   'Crypto weak despite TradFi strength — avoid crypto longs, consider stocks if you trade them',
+    '💀 FULL RISK-OFF':      'Stay cash, no crypto longs',
+  };
+
   function masterAction(regime) {
-    if (!regime)                           return 'Fetching data…';
-    if (regime.includes('FULL RISK-ON'))   return 'Max allocation — altcoins + growth assets';
-    if (regime.includes('CRYPTO LEADING')) return 'Long crypto with macro hedge';
-    if (regime.includes('RISK-ON'))        return 'Favor risk assets, add on dips';
-    if (regime.includes('NEUTRAL'))        return 'Hold core positions, avoid overtrading';
-    if (regime.includes('FULL RISK-OFF'))  return 'Defensive — exit risk assets';
-    return 'Reduce risk, prefer BTC or stablecoins';
+    if (!regime) return 'Fetching data…';
+    return MASTER_ACTIONS[regime] || 'Wait for clarity';
+  }
+
+  function masterRegimeCls(regime) {
+    if (!regime) return '';
+    if (regime.includes('FULL RISK-ON'))     return 'regime-full-bull';     // bright green
+    if (regime.includes('CRYPTO-ONLY'))      return 'regime-yellow-green';  // yellow-green
+    if (regime.includes('CRYPTO LEADING'))   return 'regime-bull';          // soft green
+    if (regime.includes('MACRO TAILWIND'))   return 'regime-neutral';       // yellow
+    if (regime.includes('MIXED'))            return 'regime-mixed';         // gray
+    if (regime.includes('DECOUPLING') || regime.includes('HEADWIND')) return 'regime-decoupling'; // orange
+    if (regime.includes('FULL RISK-OFF'))    return 'regime-full-bear';     // dark red
+    return '';
   }
 
   function topDrivers(cDetails, mDetails) {
@@ -276,9 +298,12 @@
   function regimeBoxHTML(regime, cls, action, large) {
     const boxCls = (large ? 'mc-regime-box mc-regime-box-large ' : 'mc-regime-box ') + cls;
     const actCls = large ? 'mc-action-box mc-action-box-large' : 'mc-action-box';
+    const tooltipHTML = large
+      ? ` <span class="mc-tooltip" title="Combines crypto internal strength + macro risk environment into one actionable signal for crypto trading. Divergence = crypto and TradFi disagreeing, usually means lower conviction.">?</span>`
+      : '';
     return `
       <div class="${boxCls}">
-        <div class="mc-regime-label">${large ? 'MASTER REGIME' : 'REGIME'}</div>
+        <div class="mc-regime-label">${large ? 'MASTER REGIME' : 'REGIME'}${tooltipHTML}</div>
         <div class="mc-regime-value">${regime || '—'}</div>
       </div>
       <div class="${actCls}">▶ ${action}</div>
@@ -318,7 +343,7 @@
       const ms = scoreMetrics(MACRO_METRICS,  macroData);
       const csS  = cryptoData ? { ...cs, regime: cryptoRegime(cs.score) } : null;
       const msS  = macroData  ? { ...ms, regime: macroRegime(ms.score)  } : null;
-      const regime = masterRegime(csS?.score ?? null, msS?.score ?? null, csS?.details, msS?.details);
+      const regime = masterRegime(csS?.score ?? null, msS?.score ?? null);
       const drivers = topDrivers(csS?.details, msS?.details);
 
       master.innerHTML = `
@@ -326,7 +351,7 @@
           ${csS ? `<div class="mc-master-row"><span class="mc-master-key">CRYPTO</span><span class="mc-master-val">${csS.regime}</span><span class="mc-master-score">(${csS.score}/${csS.total})</span></div>` : ''}
           ${msS ? `<div class="mc-master-row"><span class="mc-master-key">MACRO</span><span class="mc-master-val">${msS.regime}</span><span class="mc-master-score">(${msS.score}/${msS.total})</span></div>` : ''}
         </div>
-        ${regimeBoxHTML(regime, regimeCls(regime), masterAction(regime), true)}
+        ${regimeBoxHTML(regime, masterRegimeCls(regime), masterAction(regime), true)}
         ${drivers.length ? `<div class="mc-drivers"><div class="mc-drivers-label">TOP DRIVERS</div>${drivers.map(d => `<div class="mc-driver-item">${d}</div>`).join('')}</div>` : ''}
       `;
     }
