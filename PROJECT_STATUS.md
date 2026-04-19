@@ -1,84 +1,145 @@
-# TV → MEXC Scalp Panel — Project Status
+# TV → MEXC Trading System — Project Status
 
-## Status: ✅ PRODUCTION — Full System Live
+## Version: v1.0 — Full Production
 
-## Architecture
-- Chrome extension injected via CDP into TV Desktop UWP (port 9222)
-- Launcher: `scripts/start_desktop_panel.bat`
-- Webhook: `mexc-webhook-production.up.railway.app` (Railway)
-- Repo: `github.com/EchoOo999/tradingview-mcp-jackson`
+## System Components
 
-## Critical TV Desktop UWP API Knowledge
-- `widget = window.TradingViewApi._activeChartWidgetWV.value()`
-- `widget` IS the chart (no `.activeChart()` wrapper on UWP)
-- `widget.getAllShapes()` — lists all drawings
-- `widget.getShapeById(id).getPoints()` — returns `[{price, time}, ...]`
-- `widget.getShapeById(id).getProperties()` — profitLevel, stopLevel
-- `widget.removeEntity(id)` — deletes drawing
+### 1. MEXC Scalp Panel (chrome-extension/content.js)
+- Floating trading panel injected via CDP into TV Desktop UWP
+- Position: bottom-right (persisted to chrome.storage.local)
+- Features:
+  * LONG/SHORT/PUSH with live market price
+  * Cross/Isolated, Market/Limit toggles
+  * Manual $ or % of Balance
+  * R/R Preview (Position Size, Margin, PnL, Liq Price)
+  * Total Balance refresh every 10s
+  * 📋 From Drawing: reads Entry/TP/SL from TV Long/Short Position tool
+  * Auto-detects LONG/SHORT from drawing type
+  * Re-reads fresh on every click (no stale data)
+  * Market mode = live price, Limit mode = drawing entry
+  * Ctrl+F coin search overlay
 
-## Shape Name Detection (broadened regex)
-Matches: `long_position`, `short_position`, `LineToolRiskRewardLong/Short`,
-`LongTrade/ShortTrade` variants
+### 2. Market Cockpit Panel (chrome-extension/market-cockpit.js)
+- Floating regime dashboard, stacked above MEXC Scalp Panel
+- Position: bottom-right above MEXC Scalp (persisted)
+- 3 tabs: CRYPTO / MACRO / MASTER
+- TF selector: 1H / 4H / Daily / Weekly (default Daily)
+- Refresh interval configurable (30s/60s/2min/5min)
+- 8-scenario Master regime matrix (3×3 tier grid):
+  * 🚀 FULL RISK-ON
+  * ⚡ CRYPTO-ONLY RALLY
+  * 🟢 CRYPTO LEADING
+  * 🟡 MACRO TAILWIND
+  * ➡️ MIXED
+  * ⚠️ MACRO HEADWIND
+  * ⚠️ CRYPTO DECOUPLING
+  * 💀 FULL RISK-OFF
+- Color-coded regime boxes (7 severity levels)
+- Crypto-trader focused action lines
+- Top drivers: 3 biggest movers across all metrics
+- Tooltip explains divergence logic
+- Minimize → MC icon stacks above MS icon bottom-right
 
-## MEXC Order Flow
-- `Promise.all`: leverage + ticker + getContractDetail (~2s saved)
-- `getContractDetail` returns `priceUnit`, `minVol`, `volScale` per symbol
-- `roundPrice(p) = Math.round(p / priceUnit) * priceUnit` (fixes error 2015)
-- Live entry re-fetch right before payload build
-- `getOpenPosition` retry: 5×500ms
-- Timestamp logging at every step
+### 3. Railway Webhook (webhook/)
+URL: https://mexc-webhook-production.up.railway.app
+Endpoints:
+- POST /webhook — execute MEXC orders
+- GET  /balance — fetch total balance
+- GET  /market-data — Yahoo Finance proxy (DXY, OIL, GOLD, SPX, NDX, US10Y, VIX)
+- GET  /crypto-data — CoinPaprika + Binance proxy (BTC.D, USDT.D, ETH/BTC, TOTAL, TOTAL3, OTHERS)
+  * NOTE: Started on CoinGecko (IP-blocked on Railway), migrated to CoinCap
+    (DNS sunset), now on CoinPaprika. Supports ?tf=1h|4h|1d|1w via
+    percent_change_1h/6h/24h/7d fields (6h used as 4H proxy).
 
-## Features Live
+### 4. Signal Scanner (webhook/scanner.js)
+STATUS: MUTED (ALERTS_ENABLED = false at top of file)
+Detection logic active, Telegram sends disabled.
+Logs "[MUTED] Would have sent: [alert text]" instead.
+To resume: set ALERTS_ENABLED = true, redeploy.
 
-### Scalp Panel (`chrome-extension/content.js`)
-- LONG / SHORT / PUSH with live market price
-- Cross / Isolated, Market / Limit toggles
-- Manual $ or % of Balance
-- R/R Preview (Position Size, Margin, PnL, Liq Price)
-- Total Balance refresh every 10s
-- 📋 From Drawing — reads Entry/TP/SL from TV Long/Short Position tool
-- Auto-detects LONG/SHORT from drawing type
-- Re-reads fresh on every click (no stale data)
-- Market mode = live price / Limit mode = drawing entry
-- Ctrl+F coin search overlay
-
-### Signal Scanner (`webhook/scanner.js`)
+Active detection logic:
 - W Breakout 1/2 + 2/2 (4H/Daily/Weekly)
-- LJ Setup — correct logic:
-  - **LONG**: descending resistance TL with 3 rejections → clean break above → W forms above broken TL → neckline break = alert 1/2
-  - **SHORT**: ascending support TL with 3 rejections → clean break below → M forms below broken TL → neckline break = alert 1/2
-- Alert 2/2 on neckline retest + bounce
-- Staleness guard: skip breaks >7 days old
-- Full debug trace: touch timestamps, break bar, W/M lows/highs, neckline, alert bar
-- SFP scanner retained (5m, W/M on key level + confluence rank)
+- LJ Setup CORRECT logic:
+  * LONG: descending resistance TL with 3 rejections → clean break →
+    W above broken TL → neckline break = alert 1/2 → retest = 2/2
+  * SHORT: ascending support TL with 3 rejections → clean break →
+    M below broken TL → neckline break = alert 1/2 → retest = 2/2
+- 7-day staleness guard
+- Full debug trace logging
+- SFU alerts REMOVED completely
 
-### Pine Script — "Claude - Market Bias Table"
-- 6 metrics: BTC.D, USDT.D, ETH/BTC, TOTAL, TOTAL3, OTHERS
-- Direction: open→close delta on current chart TF (configurable flat threshold)
-- Color coding from ALT-bullish perspective per row
-- Score system: −6 to +6
-- 5 regimes: FULL ALT SEASON / RISK-ON / NEUTRAL / BTC DEFENSIVE / RISK-OFF
-- 3 special cases: BTC PUMP, ETH ROTATION, SMALL CAP SEASON
-- Auto $T/$B formatting for market cap values
-- Inputs: position, text size, signal row toggle, flat threshold, bold colors
+### 5. Pine Scripts (in "Pine Scripts" layout ONLY)
+- "Crypto Key Levels - by EchoOo" — 6 crypto dominance metrics, -6 to +6 score
+- "Macro Key Levels - by EchoOo" — 7 TradFi metrics, -7 to +7 score
+- "All Key Levels - by EchoOo" — combined 13-metric master table
+- "SFP Screener 1-6 - Claude" — 6 Pine scripts for MEXC perp scanning
+
+## Critical Technical Knowledge
+
+### TV Desktop UWP API (confirmed working)
+- widget = window.TradingViewApi._activeChartWidgetWV.value()
+- widget IS the chart (no .activeChart() wrapper on UWP)
+- widget.getAllShapes() → list drawings
+- widget.getShapeById(id).getPoints() → [{price, time}, ...]
+- widget.getShapeById(id).getProperties() → profitLevel, stopLevel
+- widget.removeEntity(id) → delete drawing
+
+### Shape Name Regex (broadened)
+Matches: long_position | short_position | LineToolRiskReward(Long|Short) | (Long|Short)Trade
+
+### MEXC Order Flow
+- Promise.all: leverage + ticker + getContractDetail (~2s saved)
+- priceUnit rounding prevents error 2015
+- Live entry re-fetch before payload build
+- getOpenPosition retry: 5×500ms
+- Timestamp logging every step
+
+### CDP Injection Pipeline (scripts/inject_panel.mjs)
+Injects into every TV tab in this order:
+1. styles.css (panel CSS)
+2. content.js (MEXC Scalp Panel)
+3. market-cockpit.js (Market Cockpit)
+4. coin-search-overlay.js (Ctrl+F search)
+
+Hot-reload procedure (no TV restart needed):
+1. Kill injector process on port 9224
+2. Restart: node scripts/inject_panel.mjs
+3. Reload TV tab via CDP
+4. IIFE guards prevent double-injection
+
+Full restart procedure:
+1. taskkill /F /IM TradingView.exe /T
+2. Sleep 2s
+3. Run scripts/start_desktop_panel.bat
+4. Sleep 8s
+5. Verify via CDP: both panel elements in DOM
 
 ## Hard Rules (DO NOT VIOLATE)
-- Never modify **Main Layout** or **Daily Plan** in TV
-- Only edit Pine Scripts ending in `- Claude`
-- Execute autonomously, no step-by-step confirmation needed
-- Use `/clear` between major task groups
-- Always kill + relaunch TV via `start_desktop_panel.bat` after extension changes
+- NEVER modify Main Layout or Daily Plan in TV
+- ONLY edit Pine Scripts ending in "- Claude" or "- by EchoOo"
+- Execute autonomously, no step-by-step confirmation
+- Use /clear between major task groups
+- Kill + relaunch TV via start_desktop_panel.bat after extension changes
 
 ## Parked Future Improvements
-1. Auto-draw confirmed position on TV Desktop after fill (horizontal lines safer than full Position tool)
-2. TV Position Tool → MEXC auto-capture on drawing creation (eliminate manual "From Drawing" click)
-3. Live trade performance logging to sheet/db
-4. Additional Pine Scripts for setup scanning
-5. USDT.D audit on Daily Plan (partially addressed via Market Bias Table)
+1. Resume LJ alerts after logic review + backtest validation
+2. Auto-draw confirmed position on TV Desktop after fill
+   (horizontal lines safer than full Position tool)
+3. TV Position Tool → auto-capture on drawing creation
+   (eliminate manual "From Drawing" click)
+4. Live trade performance logging to sheet/db
+5. Master Regime historical tracking + backtest
+6. Additional setup scanners (when requested)
+7. Mobile companion panel access
 
-## Resume Protocol
-Next session, Claude Code should:
-1. Read this `PROJECT_STATUS.md` first
-2. Check `git log` for recent commits
-3. Confirm TV Desktop + Railway webhook still live
+## Repo
+github.com/EchoOo999/tradingview-mcp-jackson
+
+## Resume Protocol for Next Session
+1. Read this PROJECT_STATUS.md first
+2. Check git log for recent commits since this doc
+3. Verify:
+   - TV Desktop + Railway webhook still live
+   - Both panels visible on TV
+   - Pine Scripts still in Pine Scripts layout
 4. Pick from parked improvements or take new user request
