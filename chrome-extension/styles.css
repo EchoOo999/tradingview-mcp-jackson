@@ -642,7 +642,7 @@
   border: none;
   background: transparent;
   color: #4a4e5c;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   cursor: pointer;
   letter-spacing: 0.6px;
@@ -720,13 +720,13 @@
   width: 100%;
   border-collapse: collapse;
   margin-bottom: 8px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mc-table thead th {
   color: #4a4e5c;
   font-weight: 700;
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
   padding: 0 4px 5px;
@@ -743,25 +743,25 @@
 }
 
 .mc-table tbody td {
-  padding: 4px 4px;
+  padding: 6px 4px;
   vertical-align: middle;
 }
 
 .mc-cell-symbol {
   font-weight: 700;
   color: #d1d4dc;
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
 .mc-cell-value {
   color: #b2b5be;
-  font-size: 10px;
+  font-size: 11px;
   text-align: right;
 }
 
 .mc-cell-change {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-align: right;
   white-space: nowrap;
@@ -772,7 +772,7 @@
 .mc-cell-change:not(.pos):not(.neg) { color: #787b86; }
 
 .mc-cell-arrow {
-  font-size: 10px;
+  font-size: 11px;
   text-align: center;
   width: 16px;
   color: #787b86;
@@ -782,7 +782,7 @@
 
 .mc-cell-meaning {
   color: #787b86;
-  font-size: 9px;
+  font-size: 10px;
   font-style: italic;
 }
 
@@ -796,7 +796,7 @@
 }
 
 .mc-score-label {
-  font-size: 10px;
+  font-size: 11px;
   color: #787b86;
 }
 
@@ -810,8 +810,8 @@
 }
 
 .mc-pip {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 2px;
   background: #2a2d3a;
 }
@@ -837,7 +837,7 @@
 }
 
 .mc-regime-label {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -845,13 +845,13 @@
 }
 
 .mc-regime-value {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 800;
   letter-spacing: 0.3px;
 }
 
 .mc-regime-box-large .mc-regime-value {
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .regime-full-bull {
@@ -891,13 +891,13 @@
   border: 1px solid #2a2d3a;
   border-radius: 5px;
   padding: 5px 8px;
-  font-size: 10px;
+  font-size: 11px;
   color: #b2b5be;
   margin-bottom: 4px;
 }
 
 .mc-action-box-large {
-  font-size: 11px;
+  font-size: 12px;
   padding: 7px 10px;
   margin-bottom: 8px;
 }
@@ -920,7 +920,7 @@
 }
 
 .mc-master-key {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   color: #4a4e5c;
   text-transform: uppercase;
@@ -929,14 +929,14 @@
 }
 
 .mc-master-val {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   color: #d1d4dc;
   flex: 1;
 }
 
 .mc-master-score {
-  font-size: 9px;
+  font-size: 10px;
   color: #787b86;
 }
 
@@ -950,7 +950,7 @@
 }
 
 .mc-drivers-label {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   color: #4a4e5c;
   text-transform: uppercase;
@@ -959,9 +959,9 @@
 }
 
 .mc-driver-item {
-  font-size: 10px;
+  font-size: 11px;
   color: #b2b5be;
-  padding: 1px 0;
+  padding: 2px 0;
 }
 
 /* ── Settings panel ── */

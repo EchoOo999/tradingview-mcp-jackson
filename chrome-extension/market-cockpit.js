@@ -8,11 +8,14 @@
 
   const RAILWAY_BASE = 'https://mexc-webhook-production.up.railway.app';
 
-  // ── Config (user-adjustable via settings panel) ───────────────────────────────
+  // ── Config ────────────────────────────────────────────────────────────────────
   let cfg = {
     refreshSec: 60,
-    threshold:  0.1,  // % change threshold for ▲/▼ vs ▬
+    threshold:  0.1,  // % change to count as ▲/▼ vs ▬
+    tf:         '1d', // 1h | 4h | 1d | 1w  (default: Daily)
   };
+
+  const TF_LABELS = { '1h': '1H%', '4h': '4H%', '1d': 'DAILY%', '1w': 'WEEKLY%' };
 
   // ── State ─────────────────────────────────────────────────────────────────────
   let cryptoData   = null;
@@ -20,22 +23,21 @@
   let lastTs       = 0;
   let refreshTimer = null;
   let activeTab    = 'crypto';
-  let isMinimized  = false;
   let dragging     = false, ox = 0, oy = 0;
 
   // ── Metric definitions ────────────────────────────────────────────────────────
 
   const CRYPTO_METRICS = [
     { key: 'btcD',   label: 'BTC.D',   bullDir: 'down',
-      meaning: (d) => d > cfg.threshold ? 'BTC dominance ▲' : d < -cfg.threshold ? 'Alts gaining'    : 'Stable dominance' },
+      meaning: (d) => d > cfg.threshold ? 'BTC dominance ▲' : d < -cfg.threshold ? 'Alts gaining'      : 'Stable dominance' },
     { key: 'usdtD',  label: 'USDT.D',  bullDir: 'down',
-      meaning: (d) => d > cfg.threshold ? 'Risk-off flow'   : d < -cfg.threshold ? 'Risk-on flow'    : 'Neutral flow' },
+      meaning: (d) => d > cfg.threshold ? 'Risk-off flow'   : d < -cfg.threshold ? 'Risk-on flow'       : 'Neutral flow' },
     { key: 'ethBtc', label: 'ETH/BTC', bullDir: 'up',
       meaning: (d) => d > cfg.threshold ? 'Altseason signal' : d < -cfg.threshold ? 'BTC outperforming' : 'ETH/BTC ranging' },
     { key: 'total',  label: 'TOTAL',   bullDir: 'up',
       meaning: (d) => d > cfg.threshold ? 'Market expanding' : d < -cfg.threshold ? 'Market contracting' : 'Market ranging' },
     { key: 'total3', label: 'TOTAL3',  bullDir: 'up',
-      meaning: (d) => d > cfg.threshold ? 'Alts expanding'  : d < -cfg.threshold ? 'ALT cap falling'   : 'Alts ranging' },
+      meaning: (d) => d > cfg.threshold ? 'Alts expanding'  : d < -cfg.threshold ? 'ALT cap falling'    : 'Alts ranging' },
     { key: 'others', label: 'OTHERS',  bullDir: 'up',
       meaning: (d) => d > cfg.threshold ? 'Small caps rising' : d < -cfg.threshold ? 'Small caps falling' : 'Small caps flat' },
   ];
@@ -70,16 +72,15 @@
     let score = 0;
     const details = [];
     for (const m of metrics) {
-      const entry  = dataObj ? dataObj[m.key] : null;
-      const change = entry?.change ?? null;
-      const value  = entry?.value  ?? null;
+      const entry   = dataObj ? dataObj[m.key] : null;
+      const change  = entry?.change ?? null;
+      const value   = entry?.value  ?? null;
       const bullish = change != null && isFinite(change) && (
         m.bullDir === 'up' ? change > cfg.threshold : change < -cfg.threshold
       );
       if (bullish) score++;
       details.push({
-        key: m.key, label: m.label,
-        value, change, bullish,
+        key: m.key, label: m.label, value, change, bullish,
         arrow:   arrow(change),
         meaning: change != null ? m.meaning(change) : '—',
       });
@@ -121,16 +122,12 @@
 
   function masterRegime(cs, ms, cDetails, mDetails) {
     if (cs == null || ms == null) return null;
-    const combined = cs + ms;
-    const pct      = combined / 13;
-
-    // Special cases
-    const vixBull  = mDetails?.find(d => d.key === 'VIX')?.bullish;
-    const spxBull  = mDetails?.find(d => d.key === 'SPX')?.bullish;
-    if (!vixBull && !spxBull && ms <= 1) return 'FULL RISK-OFF';
-    if (cs >= 5 && ms >= 5)              return 'FULL RISK-ON (CRYPTO BULL)';
-    if (ms <= 2 && cs >= 4)              return 'CRYPTO LEADING (MACRO LAGGING)';
-
+    const vixBull = mDetails?.find(d => d.key === 'VIX')?.bullish;
+    const spxBull = mDetails?.find(d => d.key === 'SPX')?.bullish;
+    if (!vixBull && !spxBull && ms <= 1)   return 'FULL RISK-OFF';
+    if (cs >= 5 && ms >= 5)                return 'FULL RISK-ON (CRYPTO BULL)';
+    if (ms <= 2 && cs >= 4)                return 'CRYPTO LEADING (MACRO LAGGING)';
+    const pct = (cs + ms) / 13;
     if (pct >= 0.75) return 'FULL RISK-ON';
     if (pct >= 0.55) return 'RISK-ON';
     if (pct >= 0.40) return 'NEUTRAL';
@@ -139,17 +136,16 @@
   }
 
   function masterAction(regime) {
-    if (!regime)                              return 'Fetching data…';
-    if (regime.includes('FULL RISK-ON'))      return 'Max allocation — altcoins + growth assets';
-    if (regime.includes('CRYPTO LEADING'))    return 'Long crypto with macro hedge';
-    if (regime.includes('RISK-ON'))           return 'Favor risk assets, add on dips';
-    if (regime.includes('NEUTRAL'))           return 'Hold core positions, avoid overtrading';
-    if (regime.includes('FULL RISK-OFF'))     return 'Defensive — exit risk assets';
+    if (!regime)                           return 'Fetching data…';
+    if (regime.includes('FULL RISK-ON'))   return 'Max allocation — altcoins + growth assets';
+    if (regime.includes('CRYPTO LEADING')) return 'Long crypto with macro hedge';
+    if (regime.includes('RISK-ON'))        return 'Favor risk assets, add on dips';
+    if (regime.includes('NEUTRAL'))        return 'Hold core positions, avoid overtrading';
+    if (regime.includes('FULL RISK-OFF'))  return 'Defensive — exit risk assets';
     return 'Reduce risk, prefer BTC or stablecoins';
   }
 
   function topDrivers(cDetails, mDetails) {
-    if (!cDetails && !mDetails) return [];
     const all = [
       ...(cDetails || []).map(d => ({ ...d, group: 'C' })),
       ...(mDetails || []).map(d => ({ ...d, group: 'M' })),
@@ -164,10 +160,10 @@
   function regimeCls(r) {
     if (!r) return '';
     const u = r.toUpperCase();
-    if (u.includes('FULL ALT SEASON') || u.includes('FULL RISK-ON'))    return 'regime-full-bull';
-    if (u.includes('RISK-ON') || u.includes('CRYPTO LEADING'))          return 'regime-bull';
-    if (u.includes('NEUTRAL'))                                           return 'regime-neutral';
-    if (u.includes('DEFENSIVE') || u.includes('RISK-OFF'))              return 'regime-bear';
+    if (u.includes('FULL ALT SEASON') || u.includes('FULL RISK-ON')) return 'regime-full-bull';
+    if (u.includes('RISK-ON') || u.includes('CRYPTO LEADING'))       return 'regime-bull';
+    if (u.includes('NEUTRAL'))                                        return 'regime-neutral';
+    if (u.includes('DEFENSIVE') || u.includes('RISK-OFF'))           return 'regime-bear';
     return 'regime-full-bear';
   }
 
@@ -200,32 +196,33 @@
   async function fetchAll() {
     setStatus('loading');
     const errors = [];
+    const tfParam = `?tf=${cfg.tf}`;
 
     try {
-      const r = await fetch(`${RAILWAY_BASE}/crypto-data`, { signal: AbortSignal.timeout(15_000) });
+      const r = await fetch(`${RAILWAY_BASE}/crypto-data${tfParam}`, { signal: AbortSignal.timeout(20_000) });
       const j = await r.json();
       if (j.success) cryptoData = j.data;
-      else errors.push('Crypto API error');
+      else errors.push('Crypto: ' + (j.error || 'server error'));
     } catch (err) {
-      errors.push('Crypto: ' + err.message.slice(0, 35));
+      errors.push('Crypto: ' + err.message.slice(0, 40));
     }
 
     try {
-      const r = await fetch(`${RAILWAY_BASE}/market-data`, { signal: AbortSignal.timeout(15_000) });
+      const r = await fetch(`${RAILWAY_BASE}/market-data${tfParam}`, { signal: AbortSignal.timeout(20_000) });
       const j = await r.json();
       if (j.success) macroData = j.data;
-      else errors.push('Macro API error');
+      else errors.push('Macro: ' + (j.error || 'server error'));
     } catch (err) {
-      errors.push('Macro: ' + err.message.slice(0, 35));
+      errors.push('Macro: ' + err.message.slice(0, 40));
     }
 
     lastTs = Date.now();
-    setStatus(errors.length ? 'error' : 'ok', errors.join('; '));
+    setStatus(errors.length ? 'error' : 'ok', errors.join(' | '));
     render();
   }
 
   function setStatus(type, msg) {
-    const errEl = document.getElementById('mc-error');
+    const errEl  = document.getElementById('mc-error');
     const loadEl = document.getElementById('mc-loading');
     if (!errEl || !loadEl) return;
     if (type === 'loading' && !cryptoData && !macroData) {
@@ -234,18 +231,19 @@
     } else {
       loadEl.style.display = 'none';
       if (type === 'error' && msg) {
-        errEl.textContent  = '⚠ ' + msg;
+        errEl.textContent   = '⚠ ' + msg;
         errEl.style.display = 'block';
-        setTimeout(() => { errEl.style.display = 'none'; }, 12_000);
+        setTimeout(() => { errEl.style.display = 'none'; }, 15_000);
       }
     }
   }
 
   // ── Render helpers ────────────────────────────────────────────────────────────
 
-  function tableHTML(metrics, dataObj, fmtFn, colLabel) {
-    const scored = scoreMetrics(metrics, dataObj);
+  function tableHTML(metrics, dataObj, fmtFn) {
     if (!dataObj) return '<div class="mc-no-data">Loading…</div>';
+    const scored   = scoreMetrics(metrics, dataObj);
+    const colLabel = TF_LABELS[cfg.tf] || 'CHG%';
 
     const rows = scored.details.map(d => `
       <tr class="${d.bullish ? 'mc-row-bull' : ''}">
@@ -275,19 +273,8 @@
     `;
   }
 
-  function scoreSummaryHTML(label, scored) {
-    if (!scored) return `<div class="mc-master-row"><span class="mc-master-key">${label}</span><span class="mc-master-val">—</span></div>`;
-    return `
-      <div class="mc-master-row">
-        <span class="mc-master-key">${label}</span>
-        <span class="mc-master-val">${scored.regime}</span>
-        <span class="mc-master-score">(${scored.score}/${scored.total})</span>
-      </div>
-    `;
-  }
-
   function regimeBoxHTML(regime, cls, action, large) {
-    const boxCls = large ? 'mc-regime-box mc-regime-box-large ' + cls : 'mc-regime-box ' + cls;
+    const boxCls = (large ? 'mc-regime-box mc-regime-box-large ' : 'mc-regime-box ') + cls;
     const actCls = large ? 'mc-action-box mc-action-box-large' : 'mc-action-box';
     return `
       <div class="${boxCls}">
@@ -299,13 +286,16 @@
   }
 
   function render() {
-    // Update "Xs ago" counter
     if (lastTs) {
       const el = document.getElementById('mc-last-updated');
       if (el) el.textContent = Math.round((Date.now() - lastTs) / 1000) + 's ago';
     }
 
-    const tab = activeTab;
+    // Update TF selector to reflect current state
+    const tfSel = document.getElementById('mc-tf-select');
+    if (tfSel && tfSel.value !== cfg.tf) tfSel.value = cfg.tf;
+
+    const tab    = activeTab;
     const crypto = document.getElementById('mc-tab-crypto');
     const macro  = document.getElementById('mc-tab-macro');
     const master = document.getElementById('mc-tab-master');
@@ -313,40 +303,31 @@
 
     if (tab === 'crypto') {
       const s = scoreMetrics(CRYPTO_METRICS, cryptoData);
-      crypto.innerHTML = tableHTML(CRYPTO_METRICS, cryptoData, fmtCrypto, '24h%') +
+      crypto.innerHTML = tableHTML(CRYPTO_METRICS, cryptoData, fmtCrypto) +
         regimeBoxHTML(cryptoRegime(s.score), regimeCls(cryptoRegime(s.score)), cryptoAction(s.score), false);
     }
 
     if (tab === 'macro') {
       const s = scoreMetrics(MACRO_METRICS, macroData);
-      macro.innerHTML = tableHTML(MACRO_METRICS, macroData, fmtMacro, 'Daily%') +
+      macro.innerHTML = tableHTML(MACRO_METRICS, macroData, fmtMacro) +
         regimeBoxHTML(macroRegime(s.score), regimeCls(macroRegime(s.score)), macroAction(s.score), false);
     }
 
     if (tab === 'master') {
       const cs = scoreMetrics(CRYPTO_METRICS, cryptoData);
       const ms = scoreMetrics(MACRO_METRICS,  macroData);
-      const csScored = cryptoData ? { ...cs, regime: cryptoRegime(cs.score) } : null;
-      const msScored = macroData  ? { ...ms, regime: macroRegime(ms.score)  } : null;
-      const regime   = masterRegime(
-        csScored?.score ?? null, msScored?.score ?? null,
-        csScored?.details, msScored?.details
-      );
-      const action   = masterAction(regime);
-      const drivers  = topDrivers(csScored?.details, msScored?.details);
+      const csS  = cryptoData ? { ...cs, regime: cryptoRegime(cs.score) } : null;
+      const msS  = macroData  ? { ...ms, regime: macroRegime(ms.score)  } : null;
+      const regime = masterRegime(csS?.score ?? null, msS?.score ?? null, csS?.details, msS?.details);
+      const drivers = topDrivers(csS?.details, msS?.details);
 
       master.innerHTML = `
         <div class="mc-master-grid">
-          ${scoreSummaryHTML('CRYPTO', csScored)}
-          ${scoreSummaryHTML('MACRO',  msScored)}
+          ${csS ? `<div class="mc-master-row"><span class="mc-master-key">CRYPTO</span><span class="mc-master-val">${csS.regime}</span><span class="mc-master-score">(${csS.score}/${csS.total})</span></div>` : ''}
+          ${msS ? `<div class="mc-master-row"><span class="mc-master-key">MACRO</span><span class="mc-master-val">${msS.regime}</span><span class="mc-master-score">(${msS.score}/${msS.total})</span></div>` : ''}
         </div>
-        ${regimeBoxHTML(regime, regimeCls(regime), action, true)}
-        ${drivers.length ? `
-          <div class="mc-drivers">
-            <div class="mc-drivers-label">TOP DRIVERS</div>
-            ${drivers.map(d => `<div class="mc-driver-item">${d}</div>`).join('')}
-          </div>
-        ` : ''}
+        ${regimeBoxHTML(regime, regimeCls(regime), masterAction(regime), true)}
+        ${drivers.length ? `<div class="mc-drivers"><div class="mc-drivers-label">TOP DRIVERS</div>${drivers.map(d => `<div class="mc-driver-item">${d}</div>`).join('')}</div>` : ''}
       `;
     }
   }
@@ -357,8 +338,14 @@
   panel.id    = 'market-cockpit-panel';
   panel.innerHTML = `
     <div id="mc-header">
-      <span id="mc-title">📊 MARKET COCKPIT</span>
+      <span id="mc-title">📊 COCKPIT</span>
       <div id="mc-header-actions">
+        <select id="mc-tf-select" title="Timeframe for change calculation">
+          <option value="1h">1H</option>
+          <option value="4h">4H</option>
+          <option value="1d" selected>Daily</option>
+          <option value="1w">Weekly</option>
+        </select>
         <span id="mc-last-updated">—</span>
         <button id="mc-settings-btn" title="Settings">⚙</button>
         <button id="mc-minimize" title="Minimize">−</button>
@@ -393,6 +380,10 @@
         <label>Flat threshold %</label>
         <input id="mc-threshold-input" type="number" value="0.1" step="0.05" min="0" max="2" />
       </div>
+      <div class="mc-settings-tooltip">
+        <strong>Timeframe</strong> controls the change window:<br>
+        1H = last hour · 4H = last 4h · Daily = today · Weekly = this week
+      </div>
       <button id="mc-settings-apply">Apply</button>
       <button id="mc-reset-position">Reset Position</button>
     </div>
@@ -411,7 +402,8 @@
     const mexc = document.getElementById('mexc-scalp-panel');
     if (mexc) {
       const r = mexc.getBoundingClientRect();
-      return { top: Math.max(10, r.top - (panel.offsetHeight || 400) - 8), left: r.left };
+      const h = panel.offsetHeight || 400;
+      return { top: Math.max(10, r.top - h - 8), left: r.left };
     }
     return { bottom: 320, right: 10 };
   }
@@ -438,21 +430,28 @@
   // ── Storage restore ───────────────────────────────────────────────────────────
 
   try {
-    chrome.storage.local.get(['marketCockpitPosition', 'marketCockpitMinimized', 'marketCockpitTab'], (result) => {
-      if (result.marketCockpitPosition) {
-        applyPos(result.marketCockpitPosition);
-      } else {
-        // Position above MEXC panel after both are in the DOM
-        setTimeout(() => applyPos(getDefaultPosition()), 600);
+    chrome.storage.local.get(
+      ['marketCockpitPosition', 'marketCockpitMinimized', 'marketCockpitTab', 'marketCockpitTf'],
+      (result) => {
+        if (result.marketCockpitPosition) {
+          applyPos(result.marketCockpitPosition);
+        } else {
+          setTimeout(() => applyPos(getDefaultPosition()), 600);
+        }
+        if (result.marketCockpitMinimized) {
+          panel.style.display     = 'none';
+          reopenBtn.style.display = 'flex';
+        }
+        if (result.marketCockpitTab && ['crypto','macro','master'].includes(result.marketCockpitTab)) {
+          switchTab(result.marketCockpitTab);
+        }
+        if (result.marketCockpitTf && ['1h','4h','1d','1w'].includes(result.marketCockpitTf)) {
+          cfg.tf = result.marketCockpitTf;
+          const sel = document.getElementById('mc-tf-select');
+          if (sel) sel.value = cfg.tf;
+        }
       }
-      if (result.marketCockpitMinimized) {
-        panel.style.display = 'none';
-        reopenBtn.style.display = 'flex';
-      }
-      if (result.marketCockpitTab && ['crypto','macro','master'].includes(result.marketCockpitTab)) {
-        switchTab(result.marketCockpitTab);
-      }
-    });
+    );
   } catch (_) {
     setTimeout(() => applyPos(getDefaultPosition()), 600);
   }
@@ -479,6 +478,14 @@
 
   document.addEventListener('mouseup', () => {
     if (dragging) { dragging = false; savePos(); panel.style.zIndex = ''; }
+  });
+
+  // ── TF selector ───────────────────────────────────────────────────────────────
+
+  document.getElementById('mc-tf-select').addEventListener('change', (e) => {
+    cfg.tf = e.target.value;
+    try { chrome.storage.local.set({ marketCockpitTf: cfg.tf }); } catch (_) {}
+    fetchAll();
   });
 
   // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -549,7 +556,6 @@
     refreshTimer = setInterval(fetchAll, cfg.refreshSec * 1000);
   }
 
-  // Update "Xs ago" label every second
   setInterval(() => {
     if (!lastTs) return;
     const el = document.getElementById('mc-last-updated');
@@ -561,9 +567,7 @@
   fetchAll();
   scheduleRefresh();
 
-  // Retry if data is still missing after 30s (e.g. Railway cold start)
-  setTimeout(() => {
-    if (!cryptoData || !macroData) fetchAll();
-  }, 30_000);
+  // Retry after 30s if data still missing (Railway cold start)
+  setTimeout(() => { if (!cryptoData || !macroData) fetchAll(); }, 30_000);
 
 })();

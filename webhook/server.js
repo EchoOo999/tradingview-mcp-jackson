@@ -126,99 +126,186 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Macro data proxy — Yahoo Finance (bypasses CORS for browser extension clients)
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+// Fetch ETH/BTC change for a given timeframe from Binance klines
+async function fetchEthBtcForTf(tf) {
+  if (tf === '1d') {
+    const r = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=ETHBTC',
+      { signal: AbortSignal.timeout(8_000) });
+    const j = await r.json();
+    return { value: parseFloat(j.lastPrice), change: parseFloat(j.priceChangePercent) };
+  }
+  const intervalMap = { '1h': '1h', '4h': '4h', '1w': '1w' };
+  const interval = intervalMap[tf] || '1d';
+  const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=ETHBTC&interval=${interval}&limit=2`,
+    { signal: AbortSignal.timeout(8_000) });
+  const j = await r.json();
+  if (!Array.isArray(j) || j.length < 1) throw new Error('No ETHBTC kline');
+  const bar    = j[j.length - 1];
+  const open   = parseFloat(bar[1]);
+  const close  = parseFloat(bar[4]);
+  const change = open > 0 ? ((close - open) / open) * 100 : 0;
+  return { value: close, change };
+}
+
+// Fetch price change % for a CoinCap asset over a time window
+async function fetchCoinCapChange(id, tf) {
+  const now = Date.now();
+  let start, interval;
+  if      (tf === '1h') { start = now - 3_600_000;        interval = 'm5'; }
+  else if (tf === '4h') { start = now - 14_400_000;       interval = 'h1'; }
+  else if (tf === '1w') { start = now - 7 * 86_400_000;   interval = 'd1'; }
+  else return null; // caller uses changePercent24Hr for '1d'
+
+  const url = `https://api.coincap.io/v2/assets/${id}/history?interval=${interval}&start=${start}&end=${now}`;
+  const r   = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+  const j   = await r.json();
+  const hist = j.data;
+  if (!hist || hist.length < 2) return null;
+  const first = parseFloat(hist[0].priceUsd);
+  const last  = parseFloat(hist[hist.length - 1].priceUsd);
+  return first > 0 ? ((last - first) / first) * 100 : null;
+}
+
+// ── Macro data proxy — Yahoo Finance ─────────────────────────────────────────
+// Accepts ?tf=1h|4h|1d|1w (default: 1d)
 app.get('/market-data', async (req, res) => {
+  const tf = req.query.tf || '1d';
+
+  // Map our TF to Yahoo interval + range params
+  const yfParams = {
+    '1h': { interval: '60m',  range: '1d'  },
+    '4h': { interval: '60m',  range: '2d'  },  // aggregate last 4 bars client-side
+    '1d': { interval: '1d',   range: '5d'  },
+    '1w': { interval: '1wk',  range: '1mo' },
+  }[tf] ?? { interval: '1d', range: '5d' };
+
   const YF_SYMBOLS = {
-    DXY:   'DX-Y.NYB',
-    OIL:   'CL=F',
-    GOLD:  'GC=F',
-    SPX:   '%5EGSPC',
-    NDX:   '%5EIXIC',
-    US10Y: '%5ETNX',
-    VIX:   '%5EVIX',
+    DXY: 'DX-Y.NYB', OIL: 'CL=F', GOLD: 'GC=F',
+    SPX: '%5EGSPC',  NDX: '%5EIXIC', US10Y: '%5ETNX', VIX: '%5EVIX',
   };
+
   const results = {};
   await Promise.all(Object.entries(YF_SYMBOLS).map(async ([name, yf]) => {
     try {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yf}?interval=1d&range=5d`;
-      const r = await fetch(url, {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yf}?interval=${yfParams.interval}&range=${yfParams.range}`;
+      const r   = await fetch(url, {
         signal: AbortSignal.timeout(8_000),
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; market-cockpit/1.0)' },
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const json  = await r.json();
+      const json   = await r.json();
       const meta   = json.chart?.result?.[0]?.meta;
       const quotes = json.chart?.result?.[0]?.indicators?.quote?.[0];
       const closes = (quotes?.close ?? []).filter(v => v != null);
       if (!meta || closes.length < 2) throw new Error('Insufficient data');
-      const curr   = meta.regularMarketPrice ?? closes.at(-1);
-      const prev   = closes.at(-2);
+      const curr = meta.regularMarketPrice ?? closes.at(-1);
+
+      let prev;
+      if (tf === '4h') {
+        // 4H: open of the bar that started ~4h ago; we have hourly closes, take closes[-5]
+        const window = closes.slice(-5);
+        prev = window[0];
+      } else {
+        prev = closes.at(-2);
+      }
       const change = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
-      results[name] = { value: curr, change, prev };
+      results[name] = { value: curr, change };
     } catch (err) {
-      console.warn(`[market-data] ${name}: ${err.message}`);
+      console.warn(`[market-data/${tf}] ${name}: ${err.message}`);
       results[name] = null;
     }
   }));
-  return res.json({ success: true, data: results, ts: Date.now() });
+  return res.json({ success: true, data: results, ts: Date.now(), tf });
 });
 
-// Crypto data proxy — CoinGecko + Binance (bypasses CORS for browser extension clients)
+// ── Crypto data proxy — CoinCap + Binance ─────────────────────────────────────
+// Accepts ?tf=1h|4h|1d|1w (default: 1d)
+// CoinCap replaces CoinGecko — no API key, no server-side IP blocks
 app.get('/crypto-data', async (req, res) => {
+  const tf = req.query.tf || '1d';
   try {
-    const [globalRes, marketsRes, ethBtcRes] = await Promise.all([
-      fetch('https://api.coingecko.com/api/v3/global', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
-      fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false&price_change_percentage=24h', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
-      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=ETHBTC', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+    // Current snapshot: CoinCap global + top 20 assets
+    const [globalRes, assetsRes, ethBtcData] = await Promise.all([
+      fetch('https://api.coincap.io/v2/global',           { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+      fetch('https://api.coincap.io/v2/assets?limit=20',  { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+      fetchEthBtcForTf(tf),
     ]);
 
-    const gd           = globalRes.data;
-    const totalMktCap  = gd.total_market_cap.usd;
-    const totalChange  = gd.market_cap_change_percentage_24h_usd;
-    const totalPrev    = totalMktCap / (1 + totalChange / 100);
+    const totalMktCap = parseFloat(globalRes.data.totalMarketCapUsd);
+    const assetById   = {};
+    for (const a of (assetsRes.data ?? [])) assetById[a.id] = a;
 
-    const btcCoin  = marketsRes.find(c => c.id === 'bitcoin')  ?? {};
-    const ethCoin  = marketsRes.find(c => c.id === 'ethereum') ?? {};
-    const btcMktCap = btcCoin.market_cap ?? (totalMktCap * gd.market_cap_percentage.btc / 100);
-    const ethMktCap = ethCoin.market_cap ?? (totalMktCap * gd.market_cap_percentage.eth / 100);
-    const btcChange = btcCoin.price_change_percentage_24h ?? 0;
-    const ethChange = ethCoin.price_change_percentage_24h ?? 0;
-    const btcPrev   = btcMktCap / (1 + btcChange / 100);
-    const ethPrev   = ethMktCap / (1 + ethChange / 100);
+    const btc  = assetById['bitcoin'];
+    const eth  = assetById['ethereum'];
+    const usdt = assetById['tether'];
 
-    const btcDomCurrent  = gd.market_cap_percentage.btc;
-    const btcDomPrev     = (btcPrev / totalPrev) * 100;
-    const usdtMktCap     = totalMktCap * gd.market_cap_percentage.usdt / 100;
-    const usdtDomCurrent = gd.market_cap_percentage.usdt;
-    const usdtDomPrev    = (usdtMktCap / totalPrev) * 100;
+    const btcMktCap  = parseFloat(btc?.marketCapUsd  ?? 0);
+    const ethMktCap  = parseFloat(eth?.marketCapUsd  ?? 0);
+    const usdtMktCap = parseFloat(usdt?.marketCapUsd ?? 0);
 
-    const total3Current  = totalMktCap - btcMktCap - ethMktCap;
-    const total3Prev     = totalPrev   - btcPrev   - ethPrev;
-    const total3Change   = total3Prev > 0 ? ((total3Current - total3Prev) / total3Prev) * 100 : 0;
+    // Get per-asset TF change
+    let btcChange, ethChange, usdtChange;
+    if (tf === '1d') {
+      btcChange  = parseFloat(btc?.changePercent24Hr  ?? 0);
+      ethChange  = parseFloat(eth?.changePercent24Hr  ?? 0);
+      usdtChange = parseFloat(usdt?.changePercent24Hr ?? 0);
+    } else {
+      [btcChange, ethChange, usdtChange] = await Promise.all([
+        fetchCoinCapChange('bitcoin',  tf).then(v => v ?? 0),
+        fetchCoinCapChange('ethereum', tf).then(v => v ?? 0),
+        fetchCoinCapChange('tether',   tf).then(v => v ?? 0),
+      ]);
+    }
 
-    const top10Sum       = marketsRes.reduce((s, c) => s + (c.market_cap ?? 0), 0);
-    const top10SumPrev   = marketsRes.reduce((s, c) => {
-      const chg = c.price_change_percentage_24h ?? 0;
-      return s + (c.market_cap ?? 0) / (1 + chg / 100);
+    // Estimate total market cap change as weighted avg of top 20 assets
+    const top20Sum     = (assetsRes.data ?? []).reduce((s, a) => s + parseFloat(a.marketCapUsd ?? 0), 0);
+    let   top20Change  = 0;
+    for (const a of (assetsRes.data ?? [])) {
+      const w   = parseFloat(a.marketCapUsd ?? 0) / (top20Sum || 1);
+      const chg = tf === '1d' ? parseFloat(a.changePercent24Hr ?? 0) : 0;
+      top20Change += w * chg;
+    }
+    const totalChange = top20Change; // approximate; best available without paid API
+
+    const totalPrev  = totalMktCap  / (1 + totalChange  / 100);
+    const btcPrev    = btcMktCap    / (1 + btcChange    / 100);
+    const ethPrev    = ethMktCap    / (1 + ethChange    / 100);
+
+    const btcDomCurrent  = (btcMktCap  / totalMktCap) * 100;
+    const btcDomPrev     = (btcPrev    / totalPrev)   * 100;
+    const usdtDomCurrent = (usdtMktCap / totalMktCap) * 100;
+    const usdtDomPrev    = (usdtMktCap / totalPrev)   * 100; // USDT ~stable
+
+    const total3Current = totalMktCap - btcMktCap - ethMktCap;
+    const total3Prev    = totalPrev   - btcPrev   - ethPrev;
+    const total3Change  = total3Prev > 0 ? ((total3Current - total3Prev) / total3Prev) * 100 : 0;
+
+    const top10Sum     = (assetsRes.data ?? []).slice(0, 10).reduce((s, a) => s + parseFloat(a.marketCapUsd ?? 0), 0);
+    const top10SumPrev = (assetsRes.data ?? []).slice(0, 10).reduce((s, a) => {
+      const chg = tf === '1d' ? parseFloat(a.changePercent24Hr ?? 0) : 0;
+      return s + parseFloat(a.marketCapUsd ?? 0) / (1 + chg / 100);
     }, 0);
-    const othersCurrent  = Math.max(0, totalMktCap - top10Sum);
-    const othersPrev     = Math.max(0, totalPrev   - top10SumPrev);
-    const othersChange   = othersPrev > 0 ? ((othersCurrent - othersPrev) / othersPrev) * 100 : 0;
+    const othersCurrent = Math.max(0, totalMktCap - top10Sum);
+    const othersPrev    = Math.max(0, totalPrev   - top10SumPrev);
+    const othersChange  = othersPrev > 0 ? ((othersCurrent - othersPrev) / othersPrev) * 100 : 0;
 
     return res.json({
       success: true,
       ts: Date.now(),
+      tf,
       data: {
         btcD:   { value: btcDomCurrent,  change: btcDomCurrent  - btcDomPrev },
         usdtD:  { value: usdtDomCurrent, change: usdtDomCurrent - usdtDomPrev },
-        ethBtc: { value: parseFloat(ethBtcRes.lastPrice), change: parseFloat(ethBtcRes.priceChangePercent) },
+        ethBtc: ethBtcData,
         total:  { value: totalMktCap,    change: totalChange },
         total3: { value: total3Current,  change: total3Change },
         others: { value: othersCurrent,  change: othersChange },
       },
     });
   } catch (err) {
-    console.error(`[crypto-data] ${err.message}`);
+    console.error(`[crypto-data/${tf}] ${err.message}`);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
