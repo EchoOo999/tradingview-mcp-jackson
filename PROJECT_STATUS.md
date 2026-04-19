@@ -23,7 +23,7 @@
 - Floating regime dashboard, stacked above MEXC Scalp Panel
 - Position: bottom-right above MEXC Scalp (persisted)
 - 3 tabs: CRYPTO / MACRO / MASTER
-- TF selector: 1H / 4H / Daily / Weekly (default Daily)
+- TF selector: 1H / 4H / Daily / Weekly (default Daily) — verified live via CDP 2026-04-20
 - Refresh interval configurable (30s/60s/2min/5min)
 - 8-scenario Master regime matrix (3×3 tier grid):
   * 🚀 FULL RISK-ON
@@ -102,10 +102,19 @@ Injects into every TV tab in this order:
 4. coin-search-overlay.js (Ctrl+F search)
 
 Hot-reload procedure (no TV restart needed):
-1. Kill injector process on port 9224
-2. Restart: node scripts/inject_panel.mjs
-3. Reload TV tab via CDP
-4. IIFE guards prevent double-injection
+1. Kill injector process on port 9224 (taskkill //F //PID <pid>)
+2. Restart: node scripts/inject_panel.mjs (background, confirm :9224 LISTENING)
+3. Reload TV tab via CDP (ui_evaluate: location.reload())
+4. Wait ~8s for re-inject, verify DOM via ui_evaluate
+5. IIFE guards prevent double-injection
+
+Known injection-context limits:
+- chrome.storage.local.* silently fails in CDP-injected context (try/catch swallows
+  the error). Panel position + TF persistence across reloads does NOT work as coded.
+  Non-critical: default position logic kicks in on each load.
+- Cockpit default position anchors to MEXC panel via 600ms setTimeout. If MEXC is
+  still expanding at that moment, Cockpit lands against an incomplete size and can
+  overlap once MEXC finishes rendering. Manual reposition fixes it per session.
 
 Full restart procedure:
 1. taskkill /F /IM TradingView.exe /T
