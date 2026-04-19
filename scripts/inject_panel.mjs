@@ -36,9 +36,10 @@ const SYMBOL_REFRESH_MS  = 60 * 60 * 1000;  // unused — kept for reference
 
 // ── Asset loading ────────────────────────────────────────────────────────────
 
-const panelCSS = readFileSync(join(ROOT, 'chrome-extension', 'styles.css'),  'utf8');
-const panelJS  = readFileSync(join(ROOT, 'chrome-extension', 'content.js'),  'utf8');
-const searchJS = readFileSync(join(__dir, 'coin-search-overlay.js'), 'utf8');
+const panelCSS  = readFileSync(join(ROOT, 'chrome-extension', 'styles.css'),       'utf8');
+const panelJS   = readFileSync(join(ROOT, 'chrome-extension', 'content.js'),       'utf8');
+const cockpitJS = readFileSync(join(ROOT, 'chrome-extension', 'market-cockpit.js'),'utf8');
+const searchJS  = readFileSync(join(__dir, 'coin-search-overlay.js'), 'utf8');
 
 // ── Symbol list: read from TV watchlist DOM at injection time ─────────────────
 // The overlay queries [data-symbol-full] directly on each open — no pre-fetch needed.
@@ -92,7 +93,10 @@ async function injectIntoClient(client, label) {
   // 2. Panel JS (IIFE guards against double-inject via #mexc-scalp-panel check)
   await evaluateOnTarget(client, panelJS);
 
-  // 3. Coin-search overlay (reads watchlist from TV DOM directly on each open)
+  // 3. Market Cockpit panel (IIFE guards via #market-cockpit-panel check)
+  await evaluateOnTarget(client, cockpitJS);
+
+  // 4. Coin-search overlay (reads watchlist from TV DOM directly on each open)
   await evaluateOnTarget(client, searchJS);
 
   console.log(`[panel] Injected → ${label}`);
