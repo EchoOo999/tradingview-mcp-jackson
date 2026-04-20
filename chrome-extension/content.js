@@ -591,36 +591,10 @@
 
   // ─── Balance Fetch ─────────────────────────────────────────────────────────
 
-  async function getBalanceApiKey() {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.get('balanceApiKey', (result) => {
-          resolve(result && result.balanceApiKey ? result.balanceApiKey : null);
-        });
-      } catch (_) {
-        resolve(null);
-      }
-    });
-  }
-
   async function fetchBalance() {
     const el = document.getElementById('msp-bal-total');
-    const apiKey = await getBalanceApiKey();
-    if (!apiKey) {
-      console.warn('[mexc-scalp] Balance API key not configured — open extension options to set it.');
-      el.textContent = 'set key in options';
-      el.className = 'msp-balance-val err';
-      return;
-    }
     try {
-      const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'), {
-        headers: { 'X-API-Key': apiKey },
-      });
-      if (res.status === 401) {
-        el.textContent = 'unauthorized (bad key)';
-        el.className = 'msp-balance-val err';
-        return;
-      }
+      const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'));
       const text = await res.text();
       let data;
       try { data = JSON.parse(text); } catch (_) { el.textContent = 'bad response'; el.className = 'msp-balance-val err'; return; }

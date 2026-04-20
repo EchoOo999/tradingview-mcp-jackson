@@ -3,7 +3,7 @@
   "name": "MEXC Scalp Panel",
   "version": "1.0",
   "description": "Floating MEXC Futures order panel injected into TradingView",
-  "permissions": ["storage"],
+  "permissions": [],
   "host_permissions": [
     "https://mexc-webhook-production.up.railway.app/*"
   ],
@@ -17,9 +17,5 @@
       "css": ["styles.css"],
       "run_at": "document_idle"
     }
-  ],
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": false
-  }
+  ]
 }
