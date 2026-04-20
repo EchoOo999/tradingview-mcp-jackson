@@ -30,9 +30,15 @@ const PORT          = process.env.PORT          || 3000;
 const API_KEY       = process.env.MEXC_API_KEY;
 const API_SECRET    = process.env.MEXC_SECRET;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET; // optional
+const BALANCE_API_KEY = process.env.BALANCE_API_KEY; // required for GET /balance
 
 if (!API_KEY || !API_SECRET) {
   console.error('ERROR: MEXC_API_KEY and MEXC_SECRET must be set in environment.');
+  process.exit(1);
+}
+
+if (!BALANCE_API_KEY) {
+  console.error('ERROR: BALANCE_API_KEY must be set in environment. Refuse to start with an open /balance endpoint.');
   process.exit(1);
 }
 
@@ -66,8 +72,11 @@ app.get('/test-telegram', async (req, res) => {
   }
 });
 
-// Wallet balance
+// Wallet balance — gated by X-API-Key header (shared secret with the chrome extension)
 app.get('/balance', async (req, res) => {
+  if (req.get('X-API-Key') !== BALANCE_API_KEY) {
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+  }
   try {
     const { total } = await getBalance(API_KEY, API_SECRET);
     return res.json({ success: true, total });
