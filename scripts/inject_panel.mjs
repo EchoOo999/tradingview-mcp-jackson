@@ -41,6 +41,26 @@ const panelJS   = readFileSync(join(ROOT, 'chrome-extension', 'content.js'),    
 const cockpitJS = readFileSync(join(ROOT, 'chrome-extension', 'market-cockpit.js'),'utf8');
 const searchJS  = readFileSync(join(__dir, 'coin-search-overlay.js'), 'utf8');
 
+// ── Secrets ──────────────────────────────────────────────────────────────────
+// content.js reads window.__MEXC_SCALP_CONFIG__.balanceApiKey to authenticate
+// GET /balance on the webhook service. Source of truth (in order):
+//   1. scripts/balance_api_key.local (gitignored plaintext)
+//   2. process.env.BALANCE_API_KEY
+// If neither is set we inject an empty string; the balance widget will show
+// "key missing" and the panel's other functions stay usable.
+
+function loadBalanceApiKey() {
+  try {
+    const v = readFileSync(join(__dir, 'balance_api_key.local'), 'utf8').trim();
+    if (v) return v;
+  } catch {}
+  if (process.env.BALANCE_API_KEY) return process.env.BALANCE_API_KEY.trim();
+  console.warn('[panel] BALANCE_API_KEY not configured — create scripts/balance_api_key.local or set env. Balance widget will show "key missing".');
+  return '';
+}
+
+const BALANCE_API_KEY = loadBalanceApiKey();
+
 // ── Symbol list: read from TV watchlist DOM at injection time ─────────────────
 // The overlay queries [data-symbol-full] directly on each open — no pre-fetch needed.
 
@@ -90,7 +110,11 @@ async function injectIntoClient(client, label) {
     })()
   `);
 
-  // 2. Panel JS (IIFE guards against double-inject via #mexc-scalp-panel check)
+  // 2a. Config stub — read by content.js fetchBalance() to auth /balance.
+  //     Emitted before panelJS so the global is defined when the IIFE runs.
+  await evaluateOnTarget(client, `window.__MEXC_SCALP_CONFIG__ = ${JSON.stringify({ balanceApiKey: BALANCE_API_KEY })};`);
+
+  // 2b. Panel JS (IIFE guards against double-inject via #mexc-scalp-panel check)
   await evaluateOnTarget(client, panelJS);
 
   // 3. Market Cockpit panel (IIFE guards via #market-cockpit-panel check)

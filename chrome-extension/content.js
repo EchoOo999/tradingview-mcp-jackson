@@ -593,8 +593,21 @@
 
   async function fetchBalance() {
     const el = document.getElementById('msp-bal-total');
+    const apiKey = (window.__MEXC_SCALP_CONFIG__ && window.__MEXC_SCALP_CONFIG__.balanceApiKey) || '';
+    if (!apiKey) {
+      el.textContent = 'key missing';
+      el.className = 'msp-balance-val err';
+      return;
+    }
     try {
-      const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'));
+      const res  = await fetch(WEBHOOK_URL.replace('/webhook', '/balance'), {
+        headers: { 'X-API-Key': apiKey },
+      });
+      if (res.status === 401) {
+        el.textContent = 'unauthorized';
+        el.className = 'msp-balance-val err';
+        return;
+      }
       const text = await res.text();
       let data;
       try { data = JSON.parse(text); } catch (_) { el.textContent = 'bad response'; el.className = 'msp-balance-val err'; return; }

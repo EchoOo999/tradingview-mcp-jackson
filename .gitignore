@@ -6,3 +6,6 @@ temp_*
 discovery-log.json
 .claude/
 null
+
+# Injector secrets (copy from .diag/balance_api_key.txt in echoo-alpha)
+scripts/balance_api_key.local
