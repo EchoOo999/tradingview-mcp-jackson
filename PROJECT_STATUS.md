@@ -57,6 +57,28 @@ Detection logic active, Telegram sends disabled.
 Logs "[MUTED] Would have sent: [alert text]" instead.
 To resume: set ALERTS_ENABLED = true, redeploy.
 
+#### 4a. SAE Forwarder (webhook/sae_forwarder.js) — NEW
+Second signal path: scanner detections also POST to EchoOo-SAE /ta-events as
+crypto-intel input for Polymarket bot. Independent of Telegram ALERTS_ENABLED.
+
+- Endpoint:   SAE_ENDPOINT (default https://botbridge-production.up.railway.app/ta-events)
+- Auth:       header X-SAE-Token = SAE_INGEST_TOKEN
+- Toggle:     SAE_FORWARDING_ENABLED=true|false (default false — safety)
+- Behaviour:  5s timeout, 1x retry on 5xx/network, soft 10/min rate-limit (queues excess),
+              fire-and-forget so detection path never blocks, errors logged not thrown.
+
+Wired into all 3 detection emit points:
+  * SFP (5m close) → pattern_type SFP_long | SFP_short
+  * LJ stage 1 (1H close) → LJ_{long|short}_stage1
+  * LJ stage 2 (1H retest) → LJ_{long|short}_stage2
+
+To enable in production:
+  1. Railway dashboard → mexc-webhook → Variables
+  2. Set SAE_INGEST_TOKEN to the value provisioned in EchoOo-SAE
+  3. Set SAE_FORWARDING_ENABLED=true
+  4. Redeploy (Railway auto-restarts on env change)
+  5. Confirm in logs: `[sae] forwarded SYMBOL pattern_type → 200`
+
 Active detection logic:
 - W Breakout 1/2 + 2/2 (4H/Daily/Weekly)
 - LJ Setup CORRECT logic:

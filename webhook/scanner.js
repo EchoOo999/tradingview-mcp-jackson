@@ -10,6 +10,7 @@
  */
 
 import WebSocket from 'ws';
+import { forwardSignalToSAE } from './sae_forwarder.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const WS_URL            = 'wss://contract.mexc.com/edge';
@@ -546,6 +547,79 @@ function computeSessionLevels(h1Bars) {
   };
 }
 
+// ── SAE payload mapping ───────────────────────────────────────────────────────
+// Maps scanner-internal field names to the EchoOo-SAE /ta-events shape.
+// Forwarding itself is gated by SAE_FORWARDING_ENABLED in sae_forwarder.js,
+// so these helpers always run but are no-ops when the env flag is off.
+const SAE_LEVEL_MAP = {
+  PWH:        'pwh',
+  PWL:        'pwl',
+  PMH:        null,           // monthly — not in SAE schema
+  PML:        null,
+  mondayHigh: 'monday_high',
+  mondayLow:  'monday_low',
+  weeklyOpen: 'weekly_open',
+  asiaHigh:   'asia_high',
+  asiaLow:    'asia_low',
+  londonHigh: 'london_high',
+  londonLow:  'london_low',
+};
+
+const SAE_HTF_MAP = { '4H': '4h', 'D1': '1d', 'W1': '1w' };
+
+function mapFibZone(locZone, direction) {
+  if (!locZone) return null;
+  if (locZone.includes('SHARK')) return direction === 'long' ? 'L.RLZ-SHARK' : 'S.RLZ-SHARK';
+  if (locZone.includes('P.CZ'))  return 'P.CZ';
+  if (locZone.includes('D.CZ'))  return 'D.CZ';
+  // Plain "L.RLZ" / "S.RLZ" / "L.RLZ-MM" / "S.RLZ-MM" all collapse to MM (the more common case)
+  if (locZone.startsWith('L.RLZ')) return 'L.RLZ-MM';
+  if (locZone.startsWith('S.RLZ')) return 'S.RLZ-MM';
+  return null;
+}
+
+function pctDistance(a, b) {
+  if (!isFinite(a) || !isFinite(b) || b === 0) return null;
+  return Math.round((Math.abs(a - b) / b) * 100 * 100) / 100; // 2dp
+}
+
+export function buildSFPSAEPayload({ symbol, direction, levelKey, levelPrice, currentPrice, locZone, rank }) {
+  return {
+    market_id:               null,
+    symbol,
+    timeframe:               '5m',
+    pattern_type:            direction === 'long' ? 'SFP_long' : 'SFP_short',
+    rank,
+    fib_zone:                mapFibZone(locZone, direction),
+    nearest_session_level:   SAE_LEVEL_MAP[levelKey] ?? null,
+    distance_to_level_pct:   pctDistance(currentPrice, levelPrice),
+    neckline_price:          null,            // not exposed by detectWPattern/detectMPattern
+    htf_timeframe:           '1h',            // SFP location uses 1H bars
+    signal_reliability:      0.60,
+    detected_at:             new Date().toISOString(),
+    source:                  'mexc_scanner',
+  };
+}
+
+export function buildLJSAEPayload({ symbol, direction, stage, htfTf, neckline, entry }) {
+  const dir = direction === 'long' ? 'long' : 'short';
+  return {
+    market_id:               null,
+    symbol,
+    timeframe:               '1h',           // LJ trigger fires on 1H close
+    pattern_type:            `LJ_${dir}_stage${stage}`,
+    rank:                    null,
+    fib_zone:                null,
+    nearest_session_level:   null,
+    distance_to_level_pct:   pctDistance(entry, neckline),
+    neckline_price:          isFinite(neckline) ? neckline : null,
+    htf_timeframe:           SAE_HTF_MAP[htfTf] ?? null,
+    signal_reliability:      0.60,
+    detected_at:             new Date().toISOString(),
+    source:                  'mexc_scanner',
+  };
+}
+
 // ── SFP detection (5m candle close) ──────────────────────────────────────────
 async function detectSFP(symbol) {
   try {
@@ -579,6 +653,11 @@ async function detectSFP(symbol) {
       } else {
         console.log(`[MUTED] Would have sent: ${alertText.replace(/<[^>]+>/g, '')}`);
       }
+      // SAE forwarding — independent of ALERTS_ENABLED, gated by SAE_FORWARDING_ENABLED env.
+      // Fire-and-forget so detection path never waits on the network.
+      forwardSignalToSAE(buildSFPSAEPayload({
+        symbol, direction, levelKey, levelPrice, currentPrice, locZone, rank,
+      })).catch(() => {});
       markAlerted(symbol, direction, levelKey);
     }
   } catch (err) {
@@ -893,6 +972,9 @@ async function detectLJSetup(symbol, timeframes) {
             } else {
               console.log(`[MUTED] Would have sent: ${ljText2.replace(/<[^>]+>/g, '')}`);
             }
+            forwardSignalToSAE(buildLJSAEPayload({
+              symbol, direction, stage: 2, htfTf: tf, neckline, entry: lastH1.close,
+            })).catch(() => {});
             markAlertedLJ(symbol, tf, direction, nk + ':2');
             ljStage1.delete(stageKey);
             continue;
@@ -922,6 +1004,9 @@ async function detectLJSetup(symbol, timeframes) {
         } else {
           console.log(`[MUTED] Would have sent: ${ljText1.replace(/<[^>]+>/g, '')}`);
         }
+        forwardSignalToSAE(buildLJSAEPayload({
+          symbol, direction, stage: 1, htfTf: tf, neckline, entry: lastH1.close,
+        })).catch(() => {});
         markAlertedLJ(symbol, tf, direction, nk + ':1');
         ljStage1.set(stageKey, { neckline, nk });
       }
