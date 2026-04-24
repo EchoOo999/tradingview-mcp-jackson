@@ -21,6 +21,7 @@ import express from 'express';
 import cors from 'cors';
 import { placeOrder, getBalance } from './mexc.js';
 import { startScanner } from './scanner.js';
+import { forwardRegimeToSAE } from './sae_regime_forwarder.js';
 
 const app = express();
 app.use(cors());
@@ -294,6 +295,29 @@ app.get('/crypto-data', async (req, res) => {
     console.error(`[crypto-data/${tf}] ${err.message}`);
     return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// ── Cockpit regime proxy → EchoOo-SAE ─────────────────────────────────────────
+// The browser-side cockpit POSTs its 60s regime snapshot here. We enrich it
+// and forward to SAE /regime/external using the server-held SAE_INGEST_TOKEN.
+// Gated by SAE_REGIME_PUSH_ENABLED on the server (flip env + redeploy to
+// activate; cockpit code doesn't need to change).
+//
+// Fire-and-forget for the cockpit — we don't await the SAE forward before
+// returning, so the cockpit's fetch stays fast regardless of SAE latency.
+app.post('/cockpit/regime', (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({ success: false, error: 'body must be JSON object' });
+  }
+  const enriched = { ...body };
+  if (!enriched.snapshot_at) enriched.snapshot_at = new Date().toISOString();
+  if (!enriched.source)      enriched.source      = 'market_cockpit';
+  // Non-blocking — SAE network call happens in the background.
+  forwardRegimeToSAE(enriched).catch(err => {
+    console.error(`[cockpit/regime] forward threw unexpectedly: ${err?.message || err}`);
+  });
+  return res.json({ success: true, queued: true });
 });
 
 app.listen(PORT, () => {

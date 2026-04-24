@@ -241,6 +241,79 @@
     lastTs = Date.now();
     setStatus(errors.length ? 'error' : 'ok', errors.join(' | '));
     render();
+    pushRegimeToSAE();
+  }
+
+  // ── SAE regime push ───────────────────────────────────────────────────────────
+  // Fire-and-forget: after each cockpit refresh we POST the regime snapshot to
+  // mexc-webhook's /cockpit/regime proxy, which forwards it (with the server-held
+  // X-SAE-Token) to EchoOo-SAE /regime/external.
+  //
+  // The server-side `SAE_REGIME_PUSH_ENABLED` env flag gates forwarding — this
+  // client always pushes; it's the server's job to honour the flag. That way
+  // toggling the feature is an env flip + server redeploy, no extension reload.
+  //
+  // Soft rate-limit here matches the server's (55s min interval, allowing a
+  // little jitter vs the 60s server-side floor).
+
+  let lastRegimePush = 0;
+  const REGIME_PUSH_MIN_INTERVAL_MS = 55_000;
+
+  function dirFromChange(change) {
+    if (change == null || !isFinite(change)) return null;
+    if (change >  cfg.threshold) return 'up';
+    if (change < -cfg.threshold) return 'down';
+    return 'flat';
+  }
+
+  function buildRegimePushPayload() {
+    if (!cryptoData || !macroData) return null;
+    const cs          = scoreMetrics(CRYPTO_METRICS, cryptoData);
+    const ms          = scoreMetrics(MACRO_METRICS,  macroData);
+    const masterLabel = masterRegime(cs.score, ms.score);
+    return {
+      source:               'market_cockpit',
+      source_tag:           'cockpit_chrome',
+      timeframe:            cfg.tf,
+      master_regime_label:  masterLabel,
+      crypto_score:         cs.score,
+      macro_score:          ms.score,
+      btc_d_direction:      dirFromChange(cryptoData.btcD   ? cryptoData.btcD.change   : null),
+      usdt_d_direction:     dirFromChange(cryptoData.usdtD  ? cryptoData.usdtD.change  : null),
+      eth_btc_direction:    dirFromChange(cryptoData.ethBtc ? cryptoData.ethBtc.change : null),
+      dxy_direction:        dirFromChange(macroData.DXY   ? macroData.DXY.change   : null),
+      oil_direction:        dirFromChange(macroData.OIL   ? macroData.OIL.change   : null),
+      gold_direction:       dirFromChange(macroData.GOLD  ? macroData.GOLD.change  : null),
+      spx_direction:        dirFromChange(macroData.SPX   ? macroData.SPX.change   : null),
+      ndx_direction:        dirFromChange(macroData.NDX   ? macroData.NDX.change   : null),
+      us10y_direction:      dirFromChange(macroData.US10Y ? macroData.US10Y.change : null),
+      vix_direction:        dirFromChange(macroData.VIX   ? macroData.VIX.change   : null),
+      nq_correlation_state: null,      // not computed client-side (yet)
+      sp_correlation_state: null,
+      snapshot_at:          new Date().toISOString(),
+      raw_crypto:           cryptoData,
+      raw_macro:            macroData,
+    };
+  }
+
+  function pushRegimeToSAE() {
+    try {
+      const now = Date.now();
+      if (now - lastRegimePush < REGIME_PUSH_MIN_INTERVAL_MS) return;
+      const payload = buildRegimePushPayload();
+      if (!payload || !payload.master_regime_label) return;
+      lastRegimePush = now;
+      fetch(`${RAILWAY_BASE}/cockpit/regime`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(6_000),
+      }).catch(err => {
+        console.warn('[mc] regime push failed:', (err && err.message) || err);
+      });
+    } catch (err) {
+      console.warn('[mc] regime push threw:', (err && err.message) || err);
+    }
   }
 
   function setStatus(type, msg) {
