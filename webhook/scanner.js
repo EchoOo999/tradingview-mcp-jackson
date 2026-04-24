@@ -583,6 +583,23 @@ function pctDistance(a, b) {
   return Math.round((Math.abs(a - b) / b) * 100 * 100) / 100; // 2dp
 }
 
+// Find the session/structural level closest to `price` within a fractional tolerance.
+// Returns { key, price } from the levels bag, or null if nothing is within tolerance
+// (default 2%). `levels` is the merged { PWH, PWL, mondayHigh, mondayLow, weeklyOpen,
+// asiaHigh, asiaLow, londonHigh, londonLow, ... } object; values may be null.
+export function findNearestSessionLevel(levels, price, tolerance = 0.02) {
+  if (!levels || !isFinite(price) || price <= 0) return null;
+  let best = null;
+  for (const [key, value] of Object.entries(levels)) {
+    if (value == null || !isFinite(value)) continue;
+    if (!(key in SAE_LEVEL_MAP) || SAE_LEVEL_MAP[key] == null) continue;
+    const d = Math.abs(price - value) / price;
+    if (d > tolerance) continue;
+    if (!best || d < best.distance) best = { key, price: value, distance: d };
+  }
+  return best ? { key: best.key, price: best.price } : null;
+}
+
 export function buildSFPSAEPayload({ symbol, direction, levelKey, levelPrice, currentPrice, locZone, rank }) {
   return {
     market_id:               null,
@@ -601,17 +618,34 @@ export function buildSFPSAEPayload({ symbol, direction, levelKey, levelPrice, cu
   };
 }
 
-export function buildLJSAEPayload({ symbol, direction, stage, htfTf, neckline, entry }) {
-  const dir = direction === 'long' ? 'long' : 'short';
+// LJ payload — now populates rank / fib_zone / nearest_session_level from context
+// that detectLJSetup already has on hand (h1 buffer, levelCache, getLJConfluence).
+// Rank uses the SAME 4-bit formula as SFP (calcRank) so the downstream scorer's
+// "rank >= 11" threshold (Rule Set 3 — CTA Confluence) works for both patterns.
+// `distance_to_level_pct` prefers the session-level distance when a nearby level
+// exists; falls back to the neckline distance (prior behaviour) otherwise.
+export function buildLJSAEPayload({
+  symbol, direction, stage, htfTf, neckline, entry,
+  locZone = null,
+  levelKey = null, levelPrice = null,
+  hasOBV = false, hasRSI = false, hasMACD = false,
+}) {
+  const dir             = direction === 'long' ? 'long' : 'short';
+  const hasLocation     = !!locZone;
+  const rank            = calcRank(hasLocation, !!hasOBV, !!hasRSI, !!hasMACD);
+  const sessionLevelSae = levelKey ? (SAE_LEVEL_MAP[levelKey] ?? null) : null;
+  const distancePct     = sessionLevelSae && isFinite(levelPrice)
+    ? pctDistance(entry, levelPrice)
+    : pctDistance(entry, neckline);
   return {
     market_id:               null,
     symbol,
     timeframe:               '1h',           // LJ trigger fires on 1H close
     pattern_type:            `LJ_${dir}_stage${stage}`,
-    rank:                    null,
-    fib_zone:                null,
-    nearest_session_level:   null,
-    distance_to_level_pct:   pctDistance(entry, neckline),
+    rank,
+    fib_zone:                mapFibZone(locZone, direction),
+    nearest_session_level:   sessionLevelSae,
+    distance_to_level_pct:   distancePct,
     neckline_price:          isFinite(neckline) ? neckline : null,
     htf_timeframe:           SAE_HTF_MAP[htfTf] ?? null,
     signal_reliability:      0.60,
@@ -965,6 +999,9 @@ async function detectLJSetup(symbol, timeframes) {
             : lastH1.close < neckline;
           if (retested && confirmed && !wasAlertedLJRecently(symbol, tf, direction, nk + ':2')) {
             const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
+            const locZone2 = checkGSLocation(h1, direction, lastH1.close);
+            const levelsForLJ2 = { ...(levelCache.get(symbol) || {}), ...computeSessionLevels(h1) };
+            const nearest2 = findNearestSessionLevel(levelsForLJ2, lastH1.close);
             console.log(`[lj] ★★ ${symbol} LJ ${direction.toUpperCase()} 2/2 | ${tf} | neckline=${neckline.toPrecision(6)}`);
             const ljText2 = buildLJAlert(symbol, tf, direction, 2, neckline, lastH1.close, hasRSI, hasMACD, hasOBV);
             if (ALERTS_ENABLED) {
@@ -974,6 +1011,10 @@ async function detectLJSetup(symbol, timeframes) {
             }
             forwardSignalToSAE(buildLJSAEPayload({
               symbol, direction, stage: 2, htfTf: tf, neckline, entry: lastH1.close,
+              locZone: locZone2,
+              levelKey:   nearest2 ? nearest2.key   : null,
+              levelPrice: nearest2 ? nearest2.price : null,
+              hasOBV, hasRSI, hasMACD,
             })).catch(() => {});
             markAlertedLJ(symbol, tf, direction, nk + ':2');
             ljStage1.delete(stageKey);
@@ -998,6 +1039,9 @@ async function detectLJSetup(symbol, timeframes) {
         );
 
         const { hasRSI, hasMACD, hasOBV } = getLJConfluence(h1, direction);
+        const locZone1 = checkGSLocation(h1, direction, lastH1.close);
+        const levelsForLJ1 = { ...(levelCache.get(symbol) || {}), ...computeSessionLevels(h1) };
+        const nearest1 = findNearestSessionLevel(levelsForLJ1, lastH1.close);
         const ljText1 = buildLJAlert(symbol, tf, direction, 1, neckline, lastH1.close, hasRSI, hasMACD, hasOBV);
         if (ALERTS_ENABLED) {
           await sendTelegram(ljText1);
@@ -1006,6 +1050,10 @@ async function detectLJSetup(symbol, timeframes) {
         }
         forwardSignalToSAE(buildLJSAEPayload({
           symbol, direction, stage: 1, htfTf: tf, neckline, entry: lastH1.close,
+          locZone: locZone1,
+          levelKey:   nearest1 ? nearest1.key   : null,
+          levelPrice: nearest1 ? nearest1.price : null,
+          hasOBV, hasRSI, hasMACD,
         })).catch(() => {});
         markAlertedLJ(symbol, tf, direction, nk + ':1');
         ljStage1.set(stageKey, { neckline, nk });
