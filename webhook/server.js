@@ -223,17 +223,88 @@ app.get('/market-data', async (req, res) => {
 // ── Crypto data proxy — CoinPaprika + Binance ────────────────────────────────
 // Accepts ?tf=1h|4h|1d|1w (default: 1d)
 // CoinPaprika: free, no key, no server-side IP blocks
+
+// Day 14.2 Patch 2 — in-memory cache to fit CoinPaprika free-tier quota
+// (~25k calls/month). Per-tf cache; 60s TTL matches the regime poller
+// cadence so the next poll ALWAYS hits cache except after a TTL flip.
+const _cryptoDataCache = new Map();  // tf → {at: epoch_ms, payload: {...}}
+const _CRYPTO_CACHE_TTL_MS = 60_000;
+
+function _getCryptoCache(tf) {
+  const e = _cryptoDataCache.get(tf);
+  if (!e) return null;
+  if (Date.now() - e.at > _CRYPTO_CACHE_TTL_MS) return null;
+  return e.payload;
+}
+
+function _setCryptoCache(tf, payload) {
+  _cryptoDataCache.set(tf, { at: Date.now(), payload });
+}
+
 app.get('/crypto-data', async (req, res) => {
   const tf = req.query.tf || '1d';
-  try {
-    const [globalRes, tickersRes, ethBtcData] = await Promise.all([
-      fetch('https://api.coinpaprika.com/v1/global',           { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
-      fetch('https://api.coinpaprika.com/v1/tickers?limit=20', { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
-      fetchEthBtcForTf(tf),
-    ]);
 
+  // Patch 2 — cache hit short-circuits before any external fetch.
+  const cached = _getCryptoCache(tf);
+  if (cached) {
+    return res.json({ ...cached, cache: 'HIT' });
+  }
+
+  // Patch 1 — fetch each source independently with per-source try/catch
+  // so a single failure (e.g. CoinPaprika 429 from Railway IP rate-limit)
+  // doesn't take out the others. Binance ethBtc is independent of
+  // CoinPaprika so it can still produce data when CP is rate-limited.
+  let globalRes = null;
+  let tickersRes = null;
+  let ethBtcData = null;
+
+  await Promise.all([
+    (async () => {
+      try {
+        const r = await fetch('https://api.coinpaprika.com/v1/global',
+          { signal: AbortSignal.timeout(10_000) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        // Sanity: a real response has a positive market_cap_usd.
+        // A 429 with JSON body might have an `error` field instead.
+        if (typeof j.market_cap_usd !== 'number' || j.market_cap_usd <= 0) {
+          throw new Error('missing or zero market_cap_usd in response');
+        }
+        globalRes = j;
+      } catch (err) {
+        console.warn(`[crypto-data/${tf}] coinpaprika.global: ${err.message}`);
+      }
+    })(),
+    (async () => {
+      try {
+        const r = await fetch('https://api.coinpaprika.com/v1/tickers?limit=20',
+          { signal: AbortSignal.timeout(10_000) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        if (!Array.isArray(j) || j.length === 0) {
+          throw new Error('tickers not an array or empty');
+        }
+        tickersRes = j;
+      } catch (err) {
+        console.warn(`[crypto-data/${tf}] coinpaprika.tickers: ${err.message}`);
+      }
+    })(),
+    (async () => {
+      try {
+        ethBtcData = await fetchEthBtcForTf(tf);
+      } catch (err) {
+        console.warn(`[crypto-data/${tf}] binance.ethBtc: ${err.message}`);
+      }
+    })(),
+  ]);
+
+  const globalOk  = globalRes !== null;
+  const tickersOk = tickersRes !== null;
+  const data = {};
+
+  if (globalOk && tickersOk) {
     const totalMktCap = parseFloat(globalRes.market_cap_usd ?? 0);
-    const tickers     = Array.isArray(tickersRes) ? tickersRes : [];
+    const tickers     = tickersRes;
 
     const bySymbol = {};
     for (const t of tickers) bySymbol[t.symbol] = t;
@@ -278,23 +349,44 @@ app.get('/crypto-data', async (req, res) => {
     const othersPrev    = Math.max(0, totalPrev   - top10SumPrev);
     const othersChange  = othersPrev > 0 ? ((othersCurrent - othersPrev) / othersPrev) * 100 : 0;
 
-    return res.json({
-      success: true,
-      ts: Date.now(),
-      tf,
-      data: {
-        btcD:   { value: btcDomCurrent,  change: btcDomCurrent  - btcDomPrev },
-        usdtD:  { value: usdtDomCurrent, change: usdtDomCurrent - usdtDomPrev },
-        ethBtc: ethBtcData,
-        total:  { value: totalMktCap,    change: totalChange },
-        total3: { value: total3Current,  change: total3Change },
-        others: { value: othersCurrent,  change: othersChange },
-      },
-    });
-  } catch (err) {
-    console.error(`[crypto-data/${tf}] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    // Patch 1 — only emit derived metrics when total_mkt_cap > 0. Otherwise
+    // null them out so consumers can detect missing data instead of seeing
+    // silent zeros.
+    if (totalMktCap > 0) {
+      data.btcD   = { value: btcDomCurrent,  change: btcDomCurrent  - btcDomPrev };
+      data.usdtD  = { value: usdtDomCurrent, change: usdtDomCurrent - usdtDomPrev };
+      data.total  = { value: totalMktCap,    change: totalChange };
+      data.total3 = { value: total3Current,  change: total3Change };
+      data.others = { value: othersCurrent,  change: othersChange };
+    } else {
+      data.btcD = data.usdtD = data.total = data.total3 = data.others = null;
+    }
+  } else {
+    // Either CoinPaprika source failed; null out the 5 derived metrics.
+    data.btcD = data.usdtD = data.total = data.total3 = data.others = null;
   }
+  data.ethBtc = ethBtcData;
+
+  const payload = {
+    success: true,
+    ts: Date.now(),
+    tf,
+    data,
+    sources: {
+      coinpaprika_global_ok: globalOk,
+      coinpaprika_tickers_ok: tickersOk,
+      binance_ethbtc_ok: ethBtcData !== null,
+    },
+  };
+
+  // Patch 2 — only cache "good enough" responses (at least one source
+  // succeeded). All-failed responses skip the cache so a transient blip
+  // doesn't pin null data for 60s.
+  if (globalOk || tickersOk || ethBtcData !== null) {
+    _setCryptoCache(tf, payload);
+  }
+
+  return res.json({ ...payload, cache: 'MISS' });
 });
 
 // ── Cockpit regime proxy → EchoOo-SAE ─────────────────────────────────────────
