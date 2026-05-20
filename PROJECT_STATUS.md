@@ -1,6 +1,14 @@
 # TV → MEXC Trading System — Project Status
 
-## Version: v1.0 — Full Production
+## Version: v1.1 — Security-hardened (2026-05-20)
+
+## Scope (post-2026-05-20)
+**TV → MEXC is the sole active project** in this repo. The EchoOo-SAE /
+Polymarket bot path has been abandoned. SAE forwarders (`sae_forwarder.js`,
+`sae_regime_forwarder.js`) remain in the codebase but are permanently
+disabled on Railway: `SAE_FORWARDING_ENABLED=false`,
+`SAE_REGIME_PUSH_ENABLED=false`. Don't delete them in case the path is
+ever revived — but assume they never fire in production.
 
 ## System Components
 
@@ -145,6 +153,50 @@ Full restart procedure:
 4. Sleep 8s
 5. Verify via CDP: both panel elements in DOM
 
+## Security Posture (post 2026-05-20)
+
+WEBHOOK_SECRET was rotated after a public-repo leak (a hardcoded literal
+in `chrome-extension/content.js`). Current architecture:
+
+- **`WEBHOOK_SECRET`** — provisioned to the chrome extension via injector
+  reading `scripts/webhook_secret.local` (gitignored). content.js reads it
+  from `window.__MEXC_SCALP_CONFIG__.webhookSecret` at panel-init time.
+  Never live in the repo.
+- **`BALANCE_API_KEY`** — same pattern via `scripts/balance_api_key.local`.
+  Doubles as the gate for `/test-telegram` and `/cockpit/regime`.
+
+Server hardening (all in `webhook/server.js`, commit 5a985a5 + follow-ups):
+- CORS allowlist: `tradingview.com` origins only.
+- `app.set('trust proxy', 1)` so express-rate-limit keys on the real
+  client IP behind Railway's edge.
+- `express-rate-limit` 60 req/min/IP on `/webhook`, `/market-data`,
+  `/crypto-data`, `/cockpit/regime`.
+- `MAX_USD_RISK = 500` server-side clamp on `/webhook` — caps blast
+  radius of any future secret leak.
+- `/market-data` now has a 60s in-memory cache (matches `/crypto-data`).
+
+`npm audit` is clean (`ws` bumped past GHSA-58qx-3vcg-4xpx).
+
+If `WEBHOOK_SECRET` ever needs another rotation:
+1. Generate new value (`openssl rand -hex 16` or similar).
+2. Set in Railway dashboard → `perceptive-success` → `mexc-webhook`
+   → Variables.
+3. Wait for deploy to go ACTIVE in dashboard.
+4. Update `scripts/webhook_secret.local` to match.
+5. Hot-reload procedure (below).
+
+### Railway operational notes
+- Railway CLI OAuth refresh tokens go stale fast — `railway whoami`
+  failing with `invalid_grant` means run `railway login` interactively
+  again. Login is browser-based (`--browserless` is OOB-deprecated).
+- Railway Incidents: env-var-triggered redeploys can queue for 10+
+  minutes during "Builds are slow" incidents. Status banner at top of
+  Railway dashboard signals when this is in effect.
+- Service path: project **perceptive-success** → service
+  **mexc-webhook** → URL `https://mexc-webhook-production.up.railway.app`.
+  (The other project, **zealous-hope**, holds the abandoned Polymarket
+  bot and is unrelated to this repo.)
+
 ## Hard Rules (DO NOT VIOLATE)
 - NEVER modify Main Layout or Daily Plan in TV
 - ONLY edit Pine Scripts ending in "- Claude" or "- by EchoOo"
@@ -153,6 +205,15 @@ Full restart procedure:
 - Kill + relaunch TV via start_desktop_panel.bat after extension changes
 
 ## Parked Future Improvements
+
+### Primary focus on resume: scanner optimization
+The scanner is currently MUTED (`ALERTS_ENABLED = false` in
+`webhook/scanner.js:36`) and detection-only. Next session should focus on
+re-validating signal quality before re-enabling Telegram sends — review
+recent `[MUTED] Would have sent: ...` logs and decide which detection
+classes to re-arm first.
+
+### Other parked items
 1. Resume LJ alerts after logic review + backtest validation
 2. Auto-draw confirmed position on TV Desktop after fill
    (horizontal lines safer than full Position tool)

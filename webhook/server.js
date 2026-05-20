@@ -26,6 +26,12 @@ import { forwardRegimeToSAE } from './sae_regime_forwarder.js';
 
 const app = express();
 
+// Behind Railway's edge proxy. Trust 1 hop so req.ip resolves to the real
+// client IP from X-Forwarded-For, which is what express-rate-limit keys on.
+// Without this, parallel requests from the same attacker appear as different
+// "users" (one per edge IP) and the per-IP limit never trips.
+app.set('trust proxy', 1);
+
 // CORS — restrict browser-side callers to TradingView origins. TradingView's
 // own alert servers POST server-to-server and aren't subject to CORS, so the
 // /webhook route is unaffected for legitimate TV alerts.
