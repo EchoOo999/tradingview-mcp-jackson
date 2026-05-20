@@ -303,9 +303,15 @@
       const payload = buildRegimePushPayload();
       if (!payload || !payload.master_regime_label) return;
       lastRegimePush = now;
+      const apiKey = (window.__MEXC_SCALP_CONFIG__ && window.__MEXC_SCALP_CONFIG__.balanceApiKey) || '';
+      if (!apiKey) {
+        // Without the shared secret /cockpit/regime returns 401. Skip rather
+        // than spam 401s — operator can restart the injector to provision.
+        return;
+      }
       fetch(`${RAILWAY_BASE}/cockpit/regime`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(6_000),
       }).catch(err => {

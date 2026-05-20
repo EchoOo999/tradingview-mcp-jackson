@@ -19,19 +19,44 @@
 
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { placeOrder, getBalance } from './mexc.js';
 import { startScanner } from './scanner.js';
 import { forwardRegimeToSAE } from './sae_regime_forwarder.js';
 
 const app = express();
-app.use(cors());
+
+// CORS — restrict browser-side callers to TradingView origins. TradingView's
+// own alert servers POST server-to-server and aren't subject to CORS, so the
+// /webhook route is unaffected for legitimate TV alerts.
+app.use(cors({
+  origin: ['https://www.tradingview.com', 'https://tradingview.com'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'X-API-Key'],
+}));
 app.use(express.json());
+
+// Rate limits — applied per-route below. 60 req/min/IP is comfortably above
+// the cockpit's 1-per-55s + the extension's balance-every-10s, and aggressive
+// enough to deter scraping/brute-force.
+const standardLimiter = rateLimit({
+  windowMs:        60_000,
+  limit:           60,
+  standardHeaders: 'draft-7',
+  legacyHeaders:   false,
+  message:         { success: false, error: 'rate_limited' },
+});
 
 const PORT          = process.env.PORT          || 3000;
 const API_KEY       = process.env.MEXC_API_KEY;
 const API_SECRET    = process.env.MEXC_SECRET;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET; // optional
 const BALANCE_API_KEY = process.env.BALANCE_API_KEY; // required for GET /balance
+
+// Hard server-side ceiling on per-order risk. A leaked WEBHOOK_SECRET should
+// not be able to drain the account. 500 USD * max-leverage is the worst case
+// any single forged order can cost.
+const MAX_USD_RISK = Number(process.env.MAX_USD_RISK || 500);
 
 if (!API_KEY || !API_SECRET) {
   console.error('ERROR: MEXC_API_KEY and MEXC_SECRET must be set in environment.');
@@ -46,8 +71,12 @@ if (!BALANCE_API_KEY) {
 // Health check
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'mexc-webhook' }));
 
-// Test Telegram connectivity
+// Test Telegram connectivity — gated by the same X-API-Key header as /balance
+// so random scanners can't trigger Telegram spam.
 app.get('/test-telegram', async (req, res) => {
+  if (req.get('X-API-Key') !== BALANCE_API_KEY) {
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+  }
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
@@ -87,8 +116,9 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// Main webhook endpoint
-app.post('/webhook', async (req, res) => {
+// Main webhook endpoint — rate limited as defense-in-depth against credential
+// stuffing / replay. Real legitimate volume is ~1/min from cockpit + ad-hoc.
+app.post('/webhook', standardLimiter, async (req, res) => {
   const body = req.body;
 
   // Optional secret guard
@@ -112,7 +142,14 @@ app.post('/webhook', async (req, res) => {
     return res.status(400).json({ success: false, error: `Missing fields: ${missing.join(', ')}` });
   }
 
-  console.log(`[${new Date().toISOString()}] Webhook: ${side} ${symbol} | type=${type} leverage=${leverage}x risk=$${usd_risk}`);
+  // Clamp risk to ceiling — see MAX_USD_RISK definition.
+  const requestedRisk = Number(usd_risk);
+  const clampedRisk   = Math.min(requestedRisk, MAX_USD_RISK);
+  if (clampedRisk < requestedRisk) {
+    console.warn(`[${new Date().toISOString()}] Clamped usd_risk ${requestedRisk} → ${clampedRisk} (MAX_USD_RISK=${MAX_USD_RISK})`);
+  }
+
+  console.log(`[${new Date().toISOString()}] Webhook: ${side} ${symbol} | type=${type} leverage=${leverage}x risk=$${clampedRisk}`);
 
   try {
     const result = await placeOrder({
@@ -120,7 +157,7 @@ app.post('/webhook', async (req, res) => {
       side,
       type,
       leverage: Number(leverage),
-      usd_risk: Number(usd_risk),
+      usd_risk: clampedRisk,
       price:    price ? Number(price) : undefined,
       tp:       tp    ? Number(tp)    : undefined,
       sl:       sl ? Number(sl) : undefined,
@@ -170,8 +207,29 @@ function cpChange(quotes, tf) {
 
 // ── Macro data proxy — Yahoo Finance ─────────────────────────────────────────
 // Accepts ?tf=1h|4h|1d|1w (default: 1d)
-app.get('/market-data', async (req, res) => {
+// 60s in-memory cache matches the regime poller cadence — same shape as the
+// /crypto-data cache below. Mitigates Yahoo abuse + saves ~7 fetches per poll.
+const _marketDataCache = new Map();
+const _MARKET_CACHE_TTL_MS = 60_000;
+
+function _getMarketCache(tf) {
+  const e = _marketDataCache.get(tf);
+  if (!e) return null;
+  if (Date.now() - e.at > _MARKET_CACHE_TTL_MS) return null;
+  return e.payload;
+}
+
+function _setMarketCache(tf, payload) {
+  _marketDataCache.set(tf, { at: Date.now(), payload });
+}
+
+app.get('/market-data', standardLimiter, async (req, res) => {
   const tf = req.query.tf || '1d';
+
+  const cached = _getMarketCache(tf);
+  if (cached) {
+    return res.json({ ...cached, cache: 'HIT' });
+  }
 
   // Map our TF to Yahoo interval + range params
   const yfParams = {
@@ -217,7 +275,13 @@ app.get('/market-data', async (req, res) => {
       results[name] = null;
     }
   }));
-  return res.json({ success: true, data: results, ts: Date.now(), tf });
+
+  const payload = { success: true, data: results, ts: Date.now(), tf };
+  // Only cache if at least one symbol resolved — don't pin an all-null result.
+  if (Object.values(results).some(v => v !== null)) {
+    _setMarketCache(tf, payload);
+  }
+  return res.json({ ...payload, cache: 'MISS' });
 });
 
 // ── Crypto data proxy — CoinPaprika + Binance ────────────────────────────────
@@ -241,7 +305,7 @@ function _setCryptoCache(tf, payload) {
   _cryptoDataCache.set(tf, { at: Date.now(), payload });
 }
 
-app.get('/crypto-data', async (req, res) => {
+app.get('/crypto-data', standardLimiter, async (req, res) => {
   const tf = req.query.tf || '1d';
 
   // Patch 2 — cache hit short-circuits before any external fetch.
@@ -397,7 +461,14 @@ app.get('/crypto-data', async (req, res) => {
 //
 // Fire-and-forget for the cockpit — we don't await the SAE forward before
 // returning, so the cockpit's fetch stays fast regardless of SAE latency.
-app.post('/cockpit/regime', (req, res) => {
+app.post('/cockpit/regime', standardLimiter, (req, res) => {
+  // Gate with the same X-API-Key shared secret used by /balance. The cockpit
+  // is injected from the same source as the scalp panel and already has this
+  // key available via __MEXC_SCALP_CONFIG__.balanceApiKey, so reusing it
+  // avoids a second secret rotation cycle.
+  if (req.get('X-API-Key') !== BALANCE_API_KEY) {
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+  }
   const body = req.body;
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return res.status(400).json({ success: false, error: 'body must be JSON object' });

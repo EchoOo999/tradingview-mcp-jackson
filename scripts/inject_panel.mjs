@@ -42,24 +42,31 @@ const cockpitJS = readFileSync(join(ROOT, 'chrome-extension', 'market-cockpit.js
 const searchJS  = readFileSync(join(__dir, 'coin-search-overlay.js'), 'utf8');
 
 // ── Secrets ──────────────────────────────────────────────────────────────────
-// content.js reads window.__MEXC_SCALP_CONFIG__.balanceApiKey to authenticate
-// GET /balance on the webhook service. Source of truth (in order):
-//   1. scripts/balance_api_key.local (gitignored plaintext)
-//   2. process.env.BALANCE_API_KEY
-// If neither is set we inject an empty string; the balance widget will show
-// "key missing" and the panel's other functions stay usable.
+// content.js reads window.__MEXC_SCALP_CONFIG__.{balanceApiKey,webhookSecret}
+// at inject time. Sources of truth (in order):
+//   balanceApiKey:  scripts/balance_api_key.local → process.env.BALANCE_API_KEY
+//   webhookSecret:  scripts/webhook_secret.local  → process.env.WEBHOOK_SECRET
+// Both files are gitignored. webhookSecret was added 2026-05-20 after the
+// legacy hardcoded value leaked publicly via the chrome-extension source.
 
-function loadBalanceApiKey() {
+function loadSecretFile(filename, envName) {
   try {
-    const v = readFileSync(join(__dir, 'balance_api_key.local'), 'utf8').trim();
+    const v = readFileSync(join(__dir, filename), 'utf8').trim();
     if (v) return v;
   } catch {}
-  if (process.env.BALANCE_API_KEY) return process.env.BALANCE_API_KEY.trim();
-  console.warn('[panel] BALANCE_API_KEY not configured — create scripts/balance_api_key.local or set env. Balance widget will show "key missing".');
+  if (process.env[envName]) return process.env[envName].trim();
   return '';
 }
 
-const BALANCE_API_KEY = loadBalanceApiKey();
+const BALANCE_API_KEY = loadSecretFile('balance_api_key.local', 'BALANCE_API_KEY');
+if (!BALANCE_API_KEY) {
+  console.warn('[panel] BALANCE_API_KEY not configured — create scripts/balance_api_key.local or set env. Balance widget will show "key missing".');
+}
+
+const WEBHOOK_SECRET = loadSecretFile('webhook_secret.local', 'WEBHOOK_SECRET');
+if (!WEBHOOK_SECRET) {
+  console.warn('[panel] WEBHOOK_SECRET not configured — create scripts/webhook_secret.local or set env. Order push will fail.');
+}
 
 // ── Symbol list: read from TV watchlist DOM at injection time ─────────────────
 // The overlay queries [data-symbol-full] directly on each open — no pre-fetch needed.
@@ -110,9 +117,10 @@ async function injectIntoClient(client, label) {
     })()
   `);
 
-  // 2a. Config stub — read by content.js fetchBalance() to auth /balance.
-  //     Emitted before panelJS so the global is defined when the IIFE runs.
-  await evaluateOnTarget(client, `window.__MEXC_SCALP_CONFIG__ = ${JSON.stringify({ balanceApiKey: BALANCE_API_KEY })};`);
+  // 2a. Config stub — read by content.js fetchBalance() to auth /balance and
+  //     by sendOrder() to auth /webhook. Emitted before panelJS so the global
+  //     is defined when the IIFE runs.
+  await evaluateOnTarget(client, `window.__MEXC_SCALP_CONFIG__ = ${JSON.stringify({ balanceApiKey: BALANCE_API_KEY, webhookSecret: WEBHOOK_SECRET })};`);
 
   // 2b. Panel JS (IIFE guards against double-inject via #mexc-scalp-panel check)
   await evaluateOnTarget(client, panelJS);

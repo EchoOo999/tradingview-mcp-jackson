@@ -7,7 +7,11 @@
   if (document.getElementById('mexc-scalp-panel')) return;
 
   const WEBHOOK_URL = 'https://mexc-webhook-production.up.railway.app/webhook';
-  const SECRET = 'scalp2024';
+  // Webhook auth secret is provisioned at inject time via __MEXC_SCALP_CONFIG__.
+  // The legacy hardcoded value was rotated 2026-05-20 after public-repo leak.
+  function getWebhookSecret() {
+    return (window.__MEXC_SCALP_CONFIG__ && window.__MEXC_SCALP_CONFIG__.webhookSecret) || '';
+  }
 
   // ─── Symbol Detection ──────────────────────────────────────────────────────
 
@@ -661,8 +665,13 @@
       return;
     }
 
+    const webhookSecret = getWebhookSecret();
+    if (!webhookSecret) {
+      setStatus('❌ Webhook secret missing — restart injector', 'error');
+      return;
+    }
     const payload = {
-      secret: SECRET,
+      secret: webhookSecret,
       symbol,
       side,
       type: orderType,
