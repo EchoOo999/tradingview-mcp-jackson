@@ -10,3 +10,9 @@ null
 # Injector secrets (copy from .diag/balance_api_key.txt in echoo-alpha)
 scripts/balance_api_key.local
 scripts/webhook_secret.local
+
+# Environment files
+.env
+**/.env
+.env.local
+*.env
