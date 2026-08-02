@@ -1,14 +1,17 @@
 # TV → MEXC Trading System — Project Status
 
-## Version: v1.1 — Security-hardened (2026-05-20)
+## Version: v1.2 (2026-08-02)
 
-## Scope (post-2026-05-20)
+## Scope
 **TV → MEXC is the sole active project** in this repo. The EchoOo-SAE /
 Polymarket bot path has been abandoned. SAE forwarders (`sae_forwarder.js`,
-`sae_regime_forwarder.js`) remain in the codebase but are permanently
-disabled on Railway: `SAE_FORWARDING_ENABLED=false`,
-`SAE_REGIME_PUSH_ENABLED=false`. Don't delete them in case the path is
-ever revived — but assume they never fire in production.
+`sae_regime_forwarder.js`) remain in the codebase but are env-gated off by
+default (`SAE_FORWARDING_ENABLED`, `SAE_REGIME_PUSH_ENABLED`). Don't delete
+them in case the path is ever revived.
+
+> **Runtime configuration lives in the Railway dashboard, not in this repo.**
+> This document describes what the flags *do* and how to set them — check the
+> Railway Variables tab for the values actually in effect.
 
 ## System Components
 
@@ -60,10 +63,26 @@ Endpoints:
     percent_change_1h/6h/24h/7d fields (6h used as 4H proxy).
 
 ### 4. Signal Scanner (webhook/scanner.js)
-STATUS: MUTED (ALERTS_ENABLED = false at top of file)
-Detection logic active, Telegram sends disabled.
-Logs "[MUTED] Would have sent: [alert text]" instead.
-To resume: set ALERTS_ENABLED = true, redeploy.
+
+Two independent controls, in order of severity:
+
+| Control | Where | Effect |
+|---|---|---|
+| `SCANNER_ENABLED` | Railway env var | Master switch. When not `true`, `startScanner()` never runs — no MEXC REST bootstrap, no WebSocket, no volume/level refresh timers. The webhook server still serves all HTTP routes. |
+| `ALERTS_ENABLED` | const at top of `scanner.js` | Telegram mute only. Detection still runs and logs `[MUTED] Would have sent: ...` so signal quality can be reviewed without sending. |
+
+`SCANNER_ENABLED` is gated in two places (`server.js` boot + a re-check inside
+`startScanner()`) so no other caller can start the loop while it is off. Parsing
+is lenient — trimmed, unquoted, case-insensitive — so a mistyped variable can't
+leave the scanner silently dead. Boot always logs which state it resolved to:
+
+```
+[boot] SCANNER_ENABLED: <true|false> → detection loop <starting|halted>
+```
+
+**To run the detection loop:** set `SCANNER_ENABLED=true` in Railway → redeploy.
+**To also send Telegram:** additionally set `ALERTS_ENABLED = true` in
+`webhook/scanner.js` → commit → redeploy.
 
 #### 4a. SAE Forwarder (webhook/sae_forwarder.js) — NEW
 Second signal path: scanner detections also POST to EchoOo-SAE /ta-events as
@@ -71,9 +90,10 @@ crypto-intel input for Polymarket bot. Independent of Telegram ALERTS_ENABLED.
 
 - Endpoint:   SAE_ENDPOINT (default https://botbridge-production.up.railway.app/ta-events)
 - Auth:       header X-SAE-Token = SAE_INGEST_TOKEN
-- Toggle:     SAE_FORWARDING_ENABLED=true|false (default false — safety)
-- Behaviour:  5s timeout, 1x retry on 5xx/network, soft 10/min rate-limit (queues excess),
-              fire-and-forget so detection path never blocks, errors logged not thrown.
+- Toggle:     SAE_FORWARDING_ENABLED=true|false (defaults off)
+- Behaviour:  short timeout, single retry on 5xx/network, outbound self-throttle
+              (queues excess), fire-and-forget so the detection path never blocks,
+              errors logged not thrown.
 
 Wired into all 3 detection emit points:
   * SFP (5m close) → pattern_type SFP_long | SFP_short
@@ -153,37 +173,42 @@ Full restart procedure:
 4. Sleep 8s
 5. Verify via CDP: both panel elements in DOM
 
-## Security Posture (post 2026-05-20)
+## Secret Handling
 
-WEBHOOK_SECRET was rotated after a public-repo leak (a hardcoded literal
-in `chrome-extension/content.js`). Current architecture:
+**No secret values live in this repo.** All credentials are supplied at runtime
+from the Railway environment (server side) or from gitignored local files
+(injector side). Never hardcode a credential into tracked source — the injector
+pattern below exists specifically so you don't have to.
 
-- **`WEBHOOK_SECRET`** — provisioned to the chrome extension via injector
-  reading `scripts/webhook_secret.local` (gitignored). content.js reads it
-  from `window.__MEXC_SCALP_CONFIG__.webhookSecret` at panel-init time.
-  Never live in the repo.
-- **`BALANCE_API_KEY`** — same pattern via `scripts/balance_api_key.local`.
-  Doubles as the gate for `/test-telegram` and `/cockpit/regime`.
+| Secret | Server side | Extension side |
+|---|---|---|
+| `WEBHOOK_SECRET` | Railway env var | Injector reads `scripts/webhook_secret.local` (gitignored); `content.js` picks it up from `window.__MEXC_SCALP_CONFIG__.webhookSecret` at panel-init |
+| `BALANCE_API_KEY` | Railway env var | Same pattern via `scripts/balance_api_key.local` |
+| `MEXC_API_KEY` / `MEXC_SECRET` | Railway env var | never client-side |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Railway env var | never client-side |
+| `SAE_INGEST_TOKEN` | Railway env var | never client-side |
 
-Server hardening (all in `webhook/server.js`, commit 5a985a5 + follow-ups):
-- CORS allowlist: `tradingview.com` origins only.
-- `app.set('trust proxy', 1)` so express-rate-limit keys on the real
-  client IP behind Railway's edge.
-- `express-rate-limit` 60 req/min/IP on `/webhook`, `/market-data`,
-  `/crypto-data`, `/cockpit/regime`.
-- `MAX_USD_RISK = 500` server-side clamp on `/webhook` — caps blast
-  radius of any future secret leak.
-- `/market-data` now has a 60s in-memory cache (matches `/crypto-data`).
+`webhook/.env.example` is the reference list of every environment variable the
+server reads, with placeholder values. Copy it to `webhook/.env` for local work
+— `.env` is gitignored at both repo root and `webhook/`. Keep it in sync when
+you add a new `process.env.*` read.
 
-`npm audit` is clean (`ws` bumped past GHSA-58qx-3vcg-4xpx).
+Request authentication, order-size limits, origin restrictions, per-IP throttling
+and proxy handling are all implemented in `webhook/server.js`. Read the code
+there for current behaviour rather than duplicating the parameters here — this
+doc goes stale, the code does not.
 
-If `WEBHOOK_SECRET` ever needs another rotation:
-1. Generate new value (`openssl rand -hex 16` or similar).
-2. Set in Railway dashboard → `perceptive-success` → `mexc-webhook`
-   → Variables.
-3. Wait for deploy to go ACTIVE in dashboard.
-4. Update `scripts/webhook_secret.local` to match.
-5. Hot-reload procedure (below).
+### Rotating a secret
+1. Generate a new value (`openssl rand -hex 16` or similar).
+2. Set it in Railway dashboard → `perceptive-success` → `mexc-webhook` → Variables.
+3. Wait for the deploy to reach ACTIVE.
+4. Update the matching `scripts/*.local` file if the extension consumes it.
+5. Run the hot-reload procedure (above) so the panel picks up the new value.
+
+Rotation log — `WEBHOOK_SECRET` last rotated 2026-05-20 (commit `5a985a5`).
+Credentials are never committed, so anything a secret scanner surfaces from
+history predates a rotation and is obsolete by definition. History was audited
+2026-08-02: no active credential present.
 
 ### Railway operational notes
 - Railway CLI OAuth refresh tokens go stale fast — `railway whoami`
@@ -207,11 +232,16 @@ If `WEBHOOK_SECRET` ever needs another rotation:
 ## Parked Future Improvements
 
 ### Primary focus on resume: scanner optimization
-The scanner is currently MUTED (`ALERTS_ENABLED = false` in
-`webhook/scanner.js:36`) and detection-only. Next session should focus on
-re-validating signal quality before re-enabling Telegram sends — review
-recent `[MUTED] Would have sent: ...` logs and decide which detection
-classes to re-arm first.
+Re-validate signal quality before arming Telegram sends. Order of operations:
+run the detection loop with `SCANNER_ENABLED=true` while `ALERTS_ENABLED` is
+still `false`, collect `[MUTED] Would have sent: ...` logs, then decide which
+detection classes to arm first.
+
+### Rotate BALANCE_API_KEY on schedule
+- Currently gates 3 endpoints as single shared secret (/balance, /test-telegram, /cockpit/regime)
+- Not urgent — no leak, but best practice
+- When rotating: update Railway env + scripts/balance_api_key.local
+- Hot-reload injector after rotation
 
 ### Other parked items
 1. Resume LJ alerts after logic review + backtest validation
@@ -225,13 +255,24 @@ classes to re-arm first.
 7. Mobile companion panel access
 
 ## Repo
-github.com/EchoOo999/tradingview-mcp-jackson
+github.com/EchoOo999/tradingview-mcp-jackson — **public**.
+
+Write every commit as if a stranger will read it, because they can:
+- Never commit a credential, even a throwaway one. Runtime config comes from
+  the Railway environment and gitignored `scripts/*.local` files.
+- Don't document which defenses are active or inactive in production. Describe
+  what a flag *does*, not what it is currently set to.
+- Assume the detection logic in `webhook/scanner.js` is readable by anyone.
+  That is an accepted trade-off, not an oversight — don't add to it
+  unnecessarily with tuning notes, thresholds, or backtest results in docs.
 
 ## Resume Protocol for Next Session
 1. Read this PROJECT_STATUS.md first
 2. Check git log for recent commits since this doc
 3. Verify:
-   - TV Desktop + Railway webhook still live
+   - TV Desktop + Railway webhook still live (`GET /` → `{"status":"ok"}`)
+   - Railway Variables tab for the flag values actually in effect
+   - Railway boot logs for the `[boot] SCANNER_ENABLED: ...` line
    - Both panels visible on TV
    - Pine Scripts still in Pine Scripts layout
 4. Pick from parked improvements or take new user request
