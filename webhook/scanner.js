@@ -1198,6 +1198,16 @@ async function refreshTopSymbols() {
 
 // ── Export ────────────────────────────────────────────────────────────────────
 export async function startScanner() {
+  // Second gate on the same env var server.js checks, so any other caller
+  // (script, test harness, future entrypoint) can't start the loop by accident
+  // while the kill-switch is off.
+  // Same lenient parse as server.js — see the SCANNER_ENABLED comment there.
+  const enabled = String(process.env.SCANNER_ENABLED ?? '').trim().replace(/^["']|["']$/g, '').toLowerCase() === 'true';
+  if (!enabled) {
+    console.log('[scanner] SCANNER_ENABLED is not true → startScanner() refused, detection loop halted');
+    return;
+  }
+
   console.log('[scanner] ── CTA SFP + LJ Setup Scanner starting ──');
   console.log('[scanner] SFP: Location → Structure (W/M on key level) → Momentum | 5m candle close');
   console.log('[scanner] LJ:  HTF TL (3+ rejections) → clean break → 1H W/M on opposite side → neckline break alert | 1H close');

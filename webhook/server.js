@@ -59,6 +59,16 @@ const API_SECRET    = process.env.MEXC_SECRET;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET; // optional
 const BALANCE_API_KEY = process.env.BALANCE_API_KEY; // required for GET /balance
 
+// Master kill-switch for the detection loop. Default OFF — the scanner only
+// starts when SCANNER_ENABLED is explicitly "true". While off, no MEXC REST
+// bootstrap, no WebSocket connection, and no refresh timers are created, so the
+// process idles as a plain webhook server. To resume: set SCANNER_ENABLED=true
+// on Railway and redeploy. (ALERTS_ENABLED in scanner.js only mutes Telegram —
+// this flag halts detection entirely.)
+// Lenient parse on purpose: "True", ' true ' and quoted values all count as on,
+// so a mis-typed Railway variable can't leave the scanner silently dead.
+const SCANNER_ENABLED = String(process.env.SCANNER_ENABLED ?? '').trim().replace(/^["']|["']$/g, '').toLowerCase() === 'true';
+
 // Hard server-side ceiling on per-order risk. A leaked WEBHOOK_SECRET should
 // not be able to drain the account. 500 USD * max-leverage is the worst case
 // any single forged order can cost.
@@ -492,5 +502,10 @@ app.post('/cockpit/regime', standardLimiter, (req, res) => {
 app.listen(PORT, () => {
   console.log(`Webhook server listening on port ${PORT}`);
   console.log(`POST http://localhost:${PORT}/webhook`);
-  startScanner().catch(err => console.error('[scanner] startup error:', err.message));
+  console.log(`[boot] SCANNER_ENABLED: ${SCANNER_ENABLED} → detection loop ${SCANNER_ENABLED ? 'starting' : 'halted'}`);
+  if (SCANNER_ENABLED) {
+    startScanner().catch(err => console.error('[scanner] startup error:', err.message));
+  } else {
+    console.log('[scanner] SCANNER_ENABLED=false → detection loop NOT started (no WebSocket, no refresh timers)');
+  }
 });
